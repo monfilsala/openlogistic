@@ -1,0 +1,75 @@
+# ===============================================
+#  .gitignore para Proyecto FastAPI + React
+# ===============================================
+
+# --- Archivos Específicos del Proyecto y Secretos ---
+# Ignoramos el secreto específico y la carpeta de backup completa.
+entrega2/google-services.json
+backup/google-services.json
+
+
+# ==================================
+#  Python / FastAPI (Backend)
+# ==================================
+
+# Entornos virtuales
+venv/
+env/
+.venv/
+.env/
+
+# Archivos de caché de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos de entorno que contienen secretos
+.env
+.env.*
+!.env.example
+
+# Bases de datos locales
+*.sqlite3
+db.sqlite3
+
+# Archivos de logs
+*.log
+*.log.*
+
+
+# ==================================
+#  React / Node.js (Frontend)
+# ==================================
+
+# Dependencias de Node.js
+node_modules/
+
+# Archivos de compilación de producción
+build/
+dist/
+.next/
+
+# Archivos de entorno con secretos
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs de NPM y Yarn
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+
+# ==================================
+#  Archivos Generales y del Sistema Operativo
+# ==================================
+
+# Archivos de configuración de editores de código
+.vscode/
+.idea/
+
+# Archivos del sistema operativo
+.DS_Store
+Thumbs.db

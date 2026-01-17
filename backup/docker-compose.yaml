@@ -1,0 +1,76 @@
+services:
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # ESTO ES LA CLAVE: Docker verificará si Postgres responde
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    # Verificamos que Redis responda ping
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    restart: always
+    command: >
+      sh -c "uvicorn main:app --host 0.0.0.0 --port 8000 --reload 
+             --proxy-headers 
+             --ws-ping-interval 20 
+             --ws-ping-timeout 20"
+    volumes:
+      - ./backend:/app
+      - ./google-services.json:/app/google-services.json
+    ports:
+      - "8000:8000"
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - ADMIN_DB_NAME=postgres
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - GOOGLE_MAPS_API_KEY=${GOOGLE_MAPS_API_KEY}
+    depends_on:
+      db:
+        condition: service_healthy  # ESPERA a que la BD esté saludable
+      redis:
+        condition: service_healthy  # ESPERA a que Redis esté saludable
+
+  frontend:
+    build: ./frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app           # <--- CAMBIO: Sincroniza TODO (incluido vite.config.js)
+      - /app/node_modules         # <--- IMPORTANTE: Evita que se borren las librerías del contenedor
+    depends_on:
+      - backend
+    environment:
+      - CODESPACE_NAME=${CODESPACE_NAME}
+      - GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN=${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}
+
+volumes:
+  postgres_data:
