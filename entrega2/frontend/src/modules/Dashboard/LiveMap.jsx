@@ -19,7 +19,7 @@ const LiveMap = () => {
 
   return (
     <div className="h-[500px] w-full border rounded-lg overflow-hidden shadow-lg">
-      <MapContainer center={[10.4806, -66.9036]} zoom={13} style={{ height: '100%', width: '100%' }}>
+      <MapContainer center={[10.246128, -67.598838]} zoom={13} style={{ height: '100%', width: '100%' }}>
         <TileLayer
           url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png"
           attribution='&copy; OpenStreetMap contributors'

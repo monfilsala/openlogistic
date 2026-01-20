@@ -46,8 +46,8 @@ const AllOrdersPage = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border">
-        <div><h1 className="text-xl font-bold flex items-center gap-2"><Database size={24}/> Todos los Pedidos</h1></div>
+      <div className="flex justify-between items-center  p-4 bg-white rounded-xl shadow-sm border">
+        <div><h1 className="text-xl font-bold flex items-center gap-2">Todos los Pedidos</h1></div>
         <div className="flex gap-3">
           <select className="border p-2 rounded-lg text-sm bg-white" value={filterStatus} onChange={(e) => setFilterStatus(e.target.value)}>
             <option value="all">Historial Reciente</option>

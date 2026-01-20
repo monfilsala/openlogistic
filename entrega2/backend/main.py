@@ -4,7 +4,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, date, timedelta, time
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import json
@@ -21,11 +21,13 @@ from firebase_admin import auth
 # Importar modelos, base de datos y utilidades de autenticación
 from models import *
 from database import *
-from auth_utils import get_current_user, RoleChecker, User
+from auth_utils import get_current_user, RoleChecker, User, get_current_principal
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from contextlib import asynccontextmanager
 import asyncio
+from passlib.context import CryptContext
+import secrets
 
 # --- CONFIGURACIÓN INICIAL ---
 CARACAS_TZ = pytz.timezone('America/Caracas')
@@ -145,32 +147,32 @@ async def process_scheduled_orders():
 
 async def trigger_integration_webhooks(event_type: str, data: dict, db_conn):
     """
-    Versión CORREGIDA: Busca integraciones basadas en el prefijo del ID_COMERCIO
-    y envía un webhook en segundo plano.
+    Versión final y robusta:
+    - Busca integraciones basadas en el prefijo del ID_COMERCIO.
+    - Envía un webhook en segundo plano.
+    - Maneja correctamente las variables nulas (ej: id_externo).
+    - Busca el pedido activo del repartidor para eventos de ubicación.
     """
     pedido_id = None
     
-    # 1. Determinar el pedido_id basado en el tipo de evento
-    if event_type == "DRIVER_LOCATION_UPDATE":
-        repartidor_id = data.get('id_usuario')
-        if not repartidor_id: 
-            db_conn.close()
-            return
-        with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT id FROM pedidos WHERE repartidor_id = %s AND estado NOT IN ('entregado', 'cancelado') ORDER BY fecha_creacion DESC LIMIT 1", (repartidor_id,))
-            active_order = cur.fetchone()
-            if active_order:
-                pedido_id = active_order['id']
-    else: # Para eventos como ORDER_STATUS_UPDATE, ORDER_ASSIGNED, etc.
-        pedido_id = data.get('id')
-
-    if not pedido_id:
-        db_conn.close()
-        return
-
     try:
+        # 1. Determinar el pedido_id basado en el tipo de evento
+        if event_type == "DRIVER_LOCATION_UPDATE":
+            repartidor_id = data.get('id_usuario')
+            if not repartidor_id: return
+            with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT id FROM pedidos WHERE repartidor_id = %s AND estado NOT IN ('entregado', 'cancelado') ORDER BY fecha_creacion DESC LIMIT 1", (repartidor_id,))
+                active_order = cur.fetchone()
+                if active_order:
+                    pedido_id = active_order['id']
+        else: # Para eventos como ORDER_STATUS_UPDATE, ORDER_ASSIGNED
+            pedido_id = data.get('id')
+
+        if not pedido_id:
+            return
+
         with db_conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 2. Obtener los datos clave del pedido: id_comercio y, si existe, id_externo
+            # 2. Obtener datos clave del pedido
             cur.execute("SELECT p.id_comercio, i.id_externo FROM pedidos p LEFT JOIN integraciones i ON p.id = i.pedido_id WHERE p.id = %s", (pedido_id,))
             pedido_info = cur.fetchone()
             if not pedido_info or not pedido_info.get('id_comercio'):
@@ -179,24 +181,17 @@ async def trigger_integration_webhooks(event_type: str, data: dict, db_conn):
             id_comercio = pedido_info['id_comercio']
             id_externo = pedido_info.get('id_externo')
 
-            # --- LÓGICA CLAVE CORREGIDA ---
             # 3. Buscar una configuración de integración que coincida con el PREFIJO DEL COMERCIO
-            # La columna en integration_configs ahora se llama 'id_externo_prefix' pero la usaremos para el comercio.
-            # (Podrías renombrar la columna a 'comercio_id_prefix' en el futuro para mayor claridad)
             cur.execute("SELECT * FROM integration_configs WHERE is_active = TRUE AND %s LIKE id_externo_prefix || '%%'", (id_comercio,))
             config = cur.fetchone()
-            if not config:
-                return
-            # --- FIN DE LA LÓGICA CLAVE ---
+            if not config: return
 
             webhook_config = config.get('webhooks', {}).get(event_type)
-            if not webhook_config:
-                return
+            if not webhook_config: return
 
-            # 4. Construir el payload reemplazando las variables
+            # 4. Construir el payload
             payload_template = json.dumps(webhook_config['payload_template'])
             
-            # Obtener datos del repartidor si no vienen en el evento principal
             repartidor_id = data.get('repartidor_id') or (data.get('id_usuario') if event_type == "DRIVER_LOCATION_UPDATE" else None)
             if not repartidor_id:
                 cur.execute("SELECT repartidor_id FROM pedidos WHERE id = %s", (pedido_id,))
@@ -217,9 +212,9 @@ async def trigger_integration_webhooks(event_type: str, data: dict, db_conn):
             }
             
             for key, value in replacements.items():
-                if value is not None:
-                    payload_template = payload_template.replace(key, str(value))
-            
+                replacement_value = json.dumps(value) if value is not None else 'null'
+                payload_template = payload_template.replace(f'"{key}"', replacement_value)
+
             final_payload = json.loads(payload_template)
             target_url = webhook_config['url']
 
@@ -227,12 +222,47 @@ async def trigger_integration_webhooks(event_type: str, data: dict, db_conn):
             async with httpx.AsyncClient() as client:
                 try:
                     await client.post(target_url, json=final_payload, timeout=10.0)
-                    log_system_action(db_conn, "INFO", "webhook_sent", {"integration": config['name'], "event": event_type, "url": target_url})
+                    log_system_action(db_conn, "INFO", "webhook_sent", {"integration": config['name'], "event": event_type, "url": target_url, "payload": final_payload})
                 except Exception as e:
                     log_system_action(db_conn, "ERROR", "webhook_failed", {"integration": config['name'], "event": event_type, "error": str(e)})
     finally:
-        # Es crucial cerrar la conexión que se abrió para esta tarea en segundo plano
         db_conn.close()
+
+def is_point_in_polygon(point_lat: float, point_lng: float, polygon_coords: List[List[float]]) -> bool:
+    """
+    Determina si un punto (lat, lng) está dentro de un polígono.
+    El polígono se define como una lista de puntos [[lng, lat], ...].
+    Algoritmo: Ray Casting.
+    """
+    num_vertices = len(polygon_coords)
+    if num_vertices < 3:
+        return False
+    
+    inside = False
+    
+    # El primer punto del polígono
+    p1_lng, p1_lat = polygon_coords[0]
+    
+    for i in range(1, num_vertices + 1):
+        # El siguiente punto del polígono (el último se conecta con el primero)
+        p2_lng, p2_lat = polygon_coords[i % num_vertices]
+        
+        # Comprobar si el punto está entre las latitudes de la arista del polígono
+        if min(p1_lat, p2_lat) < point_lat <= max(p1_lat, p2_lat):
+            # Comprobar si el punto está a la izquierda de la arista
+            if point_lng <= max(p1_lng, p2_lng):
+                # Calcular la intersección en el eje X
+                if p1_lat != p2_lat:
+                    x_intersection = (point_lat - p1_lat) * (p2_lng - p1_lng) / (p2_lat - p1_lat) + p1_lng
+                
+                # Si el punto está a la izquierda de la intersección, cruzamos una arista
+                if p1_lng == p2_lng or point_lng <= x_intersection:
+                    inside = not inside
+                    
+        # Mover al siguiente punto
+        p1_lng, p1_lat = p2_lng, p2_lat
+        
+    return inside
 
 # --- USAMOS LIFESPAN PARA INICIAR Y DETENER EL SCHEDULER ---
 @asynccontextmanager
@@ -305,11 +335,6 @@ class ConnectionManager:
             except Exception: pass
 manager = ConnectionManager()
 
-# --- UTILS DE BD Y LOGGING ---
-def get_db():
-    conn = get_db_connection()
-    try: yield conn
-    finally: conn.close()
 
 def log_system_action(db_conn, nivel: str, accion: str, detalles: dict, usuario: str = "sistema"):
     """
@@ -385,41 +410,70 @@ async def websocket_endpoint(websocket: WebSocket):
 async def root(): return {"message": "Delivery Platform V4.0.1 Running"}
 
 # --- ENDPOINTS DE ADMINISTRACIÓN DE USUARIOS ---
-
-@app.post("/admin/users", response_model=dict, tags=["Admin"], dependencies=[Depends(get_current_user)])
-async def create_firebase_user(user_data: NewUserRequest):
+@app.post("/admin/users/sync", tags=["Admin"], dependencies=[Depends(RoleChecker("access:all"))])
+async def sync_firebase_users_with_db(db=Depends(get_db)):
     """
-    Crea un nuevo usuario en Firebase Authentication para un repartidor.
+    Sincroniza la lista de usuarios de Firebase con la tabla local 'admin_users'.
     """
     try:
+        firebase_users = auth.list_users().iterate_all()
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            for user in firebase_users:
+                role = user.custom_claims.get('role', 'viewer') if user.custom_claims else 'viewer'
+                query = """
+                    INSERT INTO admin_users (uid, email, display_name, role, is_disabled)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (uid) DO UPDATE SET
+                        email = EXCLUDED.email,
+                        display_name = EXCLUDED.display_name,
+                        role = EXCLUDED.role,
+                        is_disabled = EXCLUDED.is_disabled,
+                        updated_at = NOW();
+                """
+                cur.execute(query, (user.uid, user.email, user.display_name, role, user.disabled))
+            db.commit()
+        return {"status": "success", "message": "Usuarios del panel sincronizados con la base de datos."}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/admin/users", response_model=dict, tags=["Admin"], dependencies=[Depends(RoleChecker("access:all"))])
+async def create_admin_user(user_data: NewUserRequest, db=Depends(get_db)):
+    """
+    Crea un nuevo usuario en Firebase y lo registra en la tabla 'admin_users'.
+    """
+    try:
+        # 1. Crear en Firebase
         user = auth.create_user(
             email=user_data.email,
             password=user_data.password,
-            display_name=user_data.display_name,
-            email_verified=False
+            display_name=user_data.display_name
         )
-        return {"uid": user.uid, "email": user.email, "message": "Usuario creado exitosamente"}
+        # 2. Asignar rol 'viewer' por defecto en Firebase
+        auth.set_custom_user_claims(user.uid, {'role': 'viewer'})
+        
+        # 3. Insertar en nuestra base de datos local
+        with db.cursor() as cur:
+            cur.execute(
+                "INSERT INTO admin_users (uid, email, display_name, role) VALUES (%s, %s, %s, %s)",
+                (user.uid, user.email, user.display_name, 'viewer')
+            )
+            db.commit()
+            
+        return {"uid": user.uid, "email": user.email, "message": "Usuario creado con rol 'viewer' por defecto."}
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
 
 @app.get("/admin/users", tags=["Admin"], dependencies=[Depends(get_current_user)])
-async def list_firebase_users():
+async def list_admin_users(db=Depends(get_db)):
     """
-    Obtiene una lista de todos los usuarios registrados en Firebase Authentication.
+    CORREGIDO: Obtiene la lista de usuarios del panel desde la tabla 'admin_users'.
     """
-    try:
-        users_list = []
-        for user in auth.list_users().iterate_all():
-            users_list.append({
-                "uid": user.uid,
-                "email": user.email,
-                "display_name": user.display_name,
-                "disabled": user.disabled,
-                "creation_timestamp": user.user_metadata.creation_timestamp,
-            })
-        return users_list
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT uid, email, display_name, role, is_disabled as disabled FROM admin_users ORDER BY email ASC")
+        users = cur.fetchall()
+        return users
 
 @app.put("/admin/users/{uid}", response_model=dict, tags=["Admin"], dependencies=[Depends(get_current_user)])
 async def update_firebase_user(uid: str, update_data: UpdateUserRequest):
@@ -481,37 +535,23 @@ async def delete_firebase_user(uid: str):
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-@app.post("/admin/users/{uid}/role", tags=["Admin"], dependencies=[Depends(get_current_user)])
-async def set_user_role(
-    uid: str, 
-    role_data: dict = Body(...), 
-    current_user: User = Depends(get_current_user) # Todavía requiere login, pero no rol
-):
+@app.post("/admin/users/{uid}/role", tags=["Admin"], dependencies=[Depends(RoleChecker("access:all"))])
+async def set_user_role(uid: str, role_data: dict = Body(...), db=Depends(get_db)):
     """
-    Asigna un rol a un usuario de Firebase a través de Custom Claims.
-    (Versión temporalmente desprotegida para asignar el primer admin).
+    Actualiza el rol en Firebase Y en la tabla local 'admin_users'.
     """
     role = role_data.get('role')
-    if not role:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "El campo 'role' es requerido.")
-    
     try:
-        # Esto incrusta el rol en el token JWT del usuario para futuros logins
+        # 1. Actualizar en Firebase
         auth.set_custom_user_claims(uid, {'role': role})
-        
-        # Loguear la acción
-        db = get_db_connection()
-        try:
-            log_system_action(db, "CRITICAL", "role_changed", 
-                              {"target_uid": uid, "new_role": role}, 
-                              usuario=current_user.email)
+        # 2. Actualizar en nuestra base de datos
+        with db.cursor() as cur:
+            cur.execute("UPDATE admin_users SET role = %s, updated_at = NOW() WHERE uid = %s", (role, uid))
             db.commit()
-        finally:
-            db.close()
-            
-        return {"status": "success", "message": f"Rol '{role}' asignado al usuario {uid}."}
+        return {"status": "success", "message": f"Rol actualizado a '{role}'."}
     except Exception as e:
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e))
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.put("/usuarios/{id_usuario}/profile", response_model=Usuario, tags=["Usuarios"], dependencies=[Depends(get_current_user)])
 async def actualizar_perfil_usuario(
@@ -540,29 +580,130 @@ async def actualizar_perfil_usuario(
 # --- ENDPOINTS DE PEDIDOS (CORE) ---
 
 @app.post("/pedidos", response_model=Pedido, status_code=201, tags=["Pedidos"])
-async def crear_pedido(pedido_data: PedidoCreate, db=Depends(get_db), current_user: User = Depends(get_current_user)):
+async def crear_pedido(
+    pedido_data: PedidoCreate,
+    db=Depends(get_db),
+    principal: Any = Depends(get_current_principal)
+):
+    """
+    Crea un nuevo pedido.
+    1. Valida la autenticación (JWT o API Key).
+    2. Valida si la dirección de entrega está en una zona restringida activa.
+    3. Si todo es válido, crea el pedido y lo notifica.
+    """
+    # --- INICIO DE LA VALIDACIÓN DE ZONA RESTRINGIDA (CON LOGS) ---
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM restricted_zones WHERE is_active = TRUE")
+        active_zones = cur.fetchall()
+
+    now_time = datetime.now(CARACAS_TZ).time()
+    logger.info(f"--- VALIDACIÓN DE ZONA PARA NUEVO PEDIDO ---")
+    logger.info(f"Punto de Entrega a Validar: Lat={pedido_data.latitud_entrega}, Lng={pedido_data.longitud_entrega}")
+    logger.info(f"Hora Actual: {now_time.strftime('%H:%M:%S')}")
+
+    for zone in active_zones:
+        logger.info(f"Verificando contra la zona '{zone['name']}' (ID: {zone['id']})")
+        
+        # 1. Comprobar si el punto está dentro del polígono
+        is_inside = is_point_in_polygon(pedido_data.latitud_entrega, pedido_data.longitud_entrega, zone['polygon_coords'])
+        
+        if not is_inside:
+            logger.info(f"-> Resultado: FUERA del polígono. Pasando a la siguiente zona.")
+            continue
+        
+        logger.warning(f"-> Resultado: ¡DENTRO del polígono de la zona '{zone['name']}'!")
+        
+        # 2. Comprobar si la restricción de horario aplica
+        is_restricted_24_7 = zone['restricted_from'] is None and zone['restricted_to'] is None
+        if is_restricted_24_7:
+            logger.warning(f"-> La zona '{zone['name']}' está restringida 24/7. RECHAZANDO PEDIDO.")
+            raise HTTPException(
+                status_code=403,
+                detail=f"La dirección de entrega se encuentra en la zona restringida"
+            )
+
+        if zone['restricted_from'] and zone['restricted_to']:
+            start_time = zone['restricted_from']
+            end_time = zone['restricted_to']
+            logger.info(f"-> Verificando rango de horario: {start_time.strftime('%H:%M')} a {end_time.strftime('%H:%M')}")
+            
+            is_in_time_range = False
+            if start_time > end_time: # Rango que cruza la medianoche (ej: 22:00 a 06:00)
+                if now_time >= start_time or now_time <= end_time:
+                    is_in_time_range = True
+            else: # Rango normal (ej: 08:00 a 17:00)
+                if start_time <= now_time <= end_time:
+                    is_in_time_range = True
+            
+            if is_in_time_range:
+                logger.warning(f"-> La hora actual está DENTRO del rango restringido. RECHAZANDO PEDIDO.")
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"La dirección de entrega se encuentra en la zona restringida '{zone['name']}' en este horario."
+                )
+            else:
+                 logger.info(f"-> La hora actual está FUERA del rango restringido. PERMITIENDO PEDIDO.")
+        else:
+            logger.info(f"-> La zona '{zone['name']}' no tiene un rango de horario definido (y no es 24/7). PERMITIENDO PEDIDO.")
+
+    logger.info(f"--- FIN DE LA VALIDACIÓN. El pedido es válido. ---")
+    # --- FIN DE LA VALIDACIÓN ---
+    
+    # Determinar el creador del pedido basado en el 'principal' de seguridad
+    creado_por: str
+    if isinstance(principal, User):
+        creado_por = principal.email
+    elif isinstance(principal, str):
+        creado_por = f"api:{principal}"
+    else:
+        raise HTTPException(status_code=403, detail="Principal de seguridad desconocido.")
+        
     try:
-        if isinstance(pedido_data.tipo_vehiculo, str): tipo_vehiculo_str = pedido_data.tipo_vehiculo
-        else: tipo_vehiculo_str = pedido_data.tipo_vehiculo.value
+        tipo_vehiculo_str = pedido_data.tipo_vehiculo.value if hasattr(pedido_data.tipo_vehiculo, 'value') else str(pedido_data.tipo_vehiculo)
+        
         with db.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT valor FROM app_config WHERE clave = 'pricing_tiers'")
             config_row = cur.fetchone()
             if not config_row: raise HTTPException(503, "Configuración de tarifas no encontrada.")
-            costo_res = calcular_costo_delivery_ruta(f"{pedido_data.latitud_retiro},{pedido_data.longitud_retiro}", f"{pedido_data.latitud_entrega},{pedido_data.longitud_entrega}", tipo_vehiculo_str, config_completa=config_row['valor'])
-        costo = costo_res.get('costo', 0.0)
-        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            
+            # Asumo que tienes una función 'calcular_costo_delivery_ruta'
+            costo_res = calcular_costo_delivery_ruta(
+                f"{pedido_data.latitud_retiro},{pedido_data.longitud_retiro}",
+                f"{pedido_data.latitud_entrega},{pedido_data.longitud_entrega}",
+                tipo_vehiculo_str,
+                config_completa=config_row['valor']
+            )
+            costo = costo_res.get('costo', 0.0)
+
             cur.execute("INSERT INTO comercios (id_comercio, nombre) VALUES (%s, %s) ON CONFLICT (id_comercio) DO NOTHING", (pedido_data.id_comercio, pedido_data.nombre_comercio))
-            q = "INSERT INTO pedidos (pedido, direccion_entrega, latitud_entrega, longitud_entrega, latitud_retiro, longitud_retiro, estado, detalles, telefono_contacto, telefono_comercio, link_maps, id_comercio, costo_servicio, tipo_vehiculo, creado_por_usuario_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
-            cur.execute(q, (pedido_data.pedido, pedido_data.direccion_entrega, pedido_data.latitud_entrega, pedido_data.longitud_entrega, pedido_data.latitud_retiro, pedido_data.longitud_retiro, 'pendiente', pedido_data.detalles, pedido_data.telefono_contacto, pedido_data.telefono_comercio, pedido_data.link_maps, pedido_data.id_comercio, costo, tipo_vehiculo_str, current_user.email))
+
+            query = "INSERT INTO pedidos (pedido, direccion_entrega, latitud_entrega, longitud_entrega, latitud_retiro, longitud_retiro, estado, detalles, telefono_contacto, telefono_comercio, link_maps, id_comercio, costo_servicio, tipo_vehiculo, creado_por_usuario_id) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *"
+            cur.execute(query, (
+                pedido_data.pedido, pedido_data.direccion_entrega, pedido_data.latitud_entrega,
+                pedido_data.longitud_entrega, pedido_data.latitud_retiro, pedido_data.longitud_retiro,
+                'pendiente', pedido_data.detalles, pedido_data.telefono_contacto,
+                pedido_data.telefono_comercio, pedido_data.link_maps, pedido_data.id_comercio,
+                costo, tipo_vehiculo_str, creado_por
+            ))
             nuevo_pedido = cur.fetchone()
-            if pedido_data.id_externo: cur.execute("INSERT INTO integraciones (pedido_id, id_externo) VALUES (%s, %s)", (nuevo_pedido['id'], pedido_data.id_externo)); nuevo_pedido['id_externo'] = pedido_data.id_externo
-            log_system_action(db, "INFO", "create_order", {"id": nuevo_pedido['id'], "cost": costo}, usuario=current_user.email)
+
+            if pedido_data.id_externo:
+                cur.execute("INSERT INTO integraciones (pedido_id, id_externo) VALUES (%s, %s)", (nuevo_pedido['id'], pedido_data.id_externo))
+                nuevo_pedido['id_externo'] = pedido_data.id_externo
+            
+            log_system_action(db, "INFO", "create_order", {"id": nuevo_pedido['id'], "cost": costo}, usuario=creado_por)
             db.commit()
+
         nuevo_pedido['nombre_comercio'] = pedido_data.nombre_comercio
         await manager.broadcast({"type": "NEW_ORDER", "data": nuevo_pedido})
+        
         return Pedido(**nuevo_pedido)
+        
     except Exception as e:
-        db.rollback(); raise HTTPException(500, str(e))
+        db.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/pedidos", response_model=List[Pedido], tags=["Pedidos"], dependencies=[Depends(get_current_user)])
 async def listar_pedidos(limit: int=100, estado: Optional[str]=None, fecha_inicio: Optional[str]=None, fecha_fin: Optional[str]=None, db=Depends(get_db)):
@@ -634,11 +775,13 @@ async def editar_pedido_completo(pedido_id: int, datos: dict = Body(...), db=Dep
 async def actualizar_estado_pedido(
     pedido_id: int, 
     data: PedidoEstadoUpdate,
-    background_tasks: BackgroundTasks, # <-- MODIFICACIÓN: Inyectar BackgroundTasks
+    background_tasks: BackgroundTasks, # <-- MODIFICACIÓN
     db=Depends(get_db), 
     current_user: User = Depends(get_current_user)
 ):
-    """Actualiza el estado de un pedido y dispara un webhook si aplica."""
+    """
+    Actualiza el estado de un pedido (ej: a llevando, entregado, etc.) y dispara un webhook.
+    """
     try:
         with db.cursor(cursor_factory=RealDictCursor) as cur:
             # 1. Bloquear el pedido y obtener su estado actual
@@ -652,10 +795,9 @@ async def actualizar_estado_pedido(
             if data.estado == EstadoPedido.PENDIENTE:
                 repartidor_id_final = None
             elif data.estado == EstadoPedido.ACEPTADO and not repartidor_id_final and not data.repartidor_id:
-                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se puede aceptar un pedido sin repartidor asignado.")
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se puede aceptar un pedido sin repartidor asignado.")
             elif data.repartidor_id:
                 repartidor_id_final = data.repartidor_id
-
 
             # 3. Actualizar la base de datos
             cur.execute(
@@ -670,17 +812,16 @@ async def actualizar_estado_pedido(
             
             db.commit()
 
-            # 5. Preparar respuesta y notificar
+            # 5. Preparar respuesta y notificar por WebSocket
             cur.execute("SELECT nombre FROM comercios WHERE id_comercio = %s", (updated['id_comercio'],))
             updated['nombre_comercio'] = cur.fetchone()['nombre']
             
             await manager.broadcast({"type": "ORDER_STATUS_UPDATE", "id": pedido_id, "data": updated})
-
-            # --- INICIO DE LA MODIFICACIÓN ---
-            # 6. Disparar el webhook en segundo plano
-            # Pasamos una copia de los datos y una nueva conexión a la BD para el thread.
+            
+            # --- INICIO DE LA MODIFICACIÓN CLAVE ---
+            # 6. Disparar el webhook de cambio de estado en segundo plano
             background_tasks.add_task(trigger_integration_webhooks, "ORDER_STATUS_UPDATE", updated.copy(), get_db_connection())
-            # --- FIN DE LA MODIFICACIÓN ---
+            # --- FIN DE LA MODIFICACIÓN CLAVE ---
             
             return Pedido(**updated)
     except HTTPException as http_exc:
@@ -1181,14 +1322,15 @@ async def get_active_drivers(db=Depends(get_db)):
 async def asignar_repartidor_a_pedido(
     pedido_id: int, 
     data: PedidoAsignarRepartidor,
-    background_tasks: BackgroundTasks, # <-- MODIFICACIÓN: Inyectar BackgroundTasks
+    background_tasks: BackgroundTasks, # <-- MODIFICACIÓN
     db=Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Asigna un repartidor a un pedido pendiente y dispara los webhooks correspondientes.
+    Asigna un repartidor a un pedido pendiente y dispara el webhook de cambio de estado.
     """
     with db.cursor(cursor_factory=RealDictCursor) as cur:
+        # 1. Bloquear y validar el pedido
         cur.execute("SELECT * FROM pedidos WHERE id = %s FOR UPDATE", (pedido_id,))
         pedido = cur.fetchone()
         if not pedido:
@@ -1196,39 +1338,47 @@ async def asignar_repartidor_a_pedido(
         if pedido['estado'] != 'pendiente':
             raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No se puede asignar. El pedido ya está en estado '{pedido['estado']}'.")
 
+        # 2. Validar que el repartidor exista
         cur.execute("SELECT id_usuario FROM usuarios WHERE id_usuario = %s", (data.repartidor_id,))
         if not cur.fetchone():
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"Repartidor con ID '{data.repartidor_id}' no encontrado.")
             
-        # Actualizamos estado, repartidor y la fecha de actualización
+        # 3. Actualizar el pedido en la base de datos
         cur.execute(
             "UPDATE pedidos SET repartidor_id = %s, estado = 'aceptado', fecha_actualizacion = NOW() WHERE id = %s RETURNING *",
             (data.repartidor_id, pedido_id)
         )
         updated_pedido = cur.fetchone()
 
+        # 4. Registrar logs
         log_pedido_status_change(cur, pedido_id, "aceptado", data.repartidor_id, manual_change=True)
         log_system_action(db, "WARNING", "manual_assign", {"pedido_id": pedido_id, "driver_id": data.repartidor_id}, usuario=current_user.email)
         
         db.commit()
 
+        # 5. Preparar respuesta y notificar por WebSocket
         cur.execute("SELECT nombre FROM comercios WHERE id_comercio = %s", (updated_pedido['id_comercio'],))
         updated_pedido['nombre_comercio'] = cur.fetchone()['nombre']
         
         await manager.broadcast({"type": "ORDER_ASSIGNED", "id": pedido_id, "repartidor_id": data.repartidor_id, "data": updated_pedido})
         
-        # --- INICIO DE LA CORRECCIÓN ---
-        # Disparamos el webhook en segundo plano con el evento 'ORDER_ASSIGNED'
-        background_tasks.add_task(trigger_integration_webhooks, "ORDER_ASSIGNED", updated_pedido.copy(), get_db_connection())
-        # --- FIN DE LA CORRECCIÓN ---
+        # --- INICIO DE LA MODIFICACIÓN CLAVE ---
+        # 6. Disparar el webhook de cambio de estado en segundo plano
+        background_tasks.add_task(trigger_integration_webhooks, "ORDER_STATUS_UPDATE", updated_pedido.copy(), get_db_connection())
+        # --- FIN DE LA MODIFICACIÓN CLAVE ---
 
         return Pedido(**updated_pedido)
 
-@app.get("/integrations", response_model=List[IntegrationConfig], tags=["Integrations"], dependencies=[Depends(get_current_user)])
+@app.get("/integrations", response_model=List[IntegrationConfig], tags=["Integrations"])
 async def list_integrations(db=Depends(get_db)):
-    """Obtiene una lista de todas las configuraciones de integración."""
+    query = """
+        SELECT i.*, row_to_json(ak.*) as api_key
+        FROM integration_configs i
+        LEFT JOIN api_keys ak ON i.name = ak.client_name AND ak.is_active = TRUE
+        ORDER BY i.name ASC;
+    """
     with db.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("SELECT * FROM integration_configs ORDER BY name ASC")
+        cur.execute(query)
         return [IntegrationConfig(**row) for row in cur.fetchall()]
 
 @app.get("/integrations/{integration_id}", response_model=IntegrationConfig, tags=["Integrations"], dependencies=[Depends(get_current_user)])
@@ -1303,3 +1453,219 @@ async def delete_integration(integration_id: int, db=Depends(get_db)):
             raise HTTPException(status_code=404, detail="Configuración de integración no encontrada")
         db.commit()
     return {"status": "deleted", "id": integration_id}
+
+@app.get("/analytics/summary", response_model=AnalyticsResponse, tags=["Analytics"])
+async def get_analytics_summary(
+    start_date: date,
+    end_date: date,
+    repartidor_id: Optional[str] = None,
+    id_comercio: Optional[str] = None,
+    db=Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Calcula y devuelve un resumen completo de estadísticas, AHORA CON CORRECCIÓN DE ZONA HORARIA.
+    """
+    # --- INICIO DE LA CORRECCIÓN CLAVE ---
+    timezone = str(CARACAS_TZ) # Usamos la zona horaria definida en la configuración
+    params = {'start_date': start_date, 'end_date': end_date, 'tz': timezone}
+    
+    # Construimos los filtros dinámicos, convirtiendo la fecha del pedido a la zona horaria local ANTES de comparar
+    filter_clauses = "WHERE (p.fecha_creacion AT TIME ZONE %(tz)s)::date BETWEEN %(start_date)s AND %(end_date)s"
+    # --- FIN DE LA CORRECCIÓN CLAVE ---
+    
+    if repartidor_id:
+        filter_clauses += " AND p.repartidor_id = %(repartidor_id)s"
+        params['repartidor_id'] = repartidor_id
+    if id_comercio:
+        filter_clauses += " AND p.id_comercio = %(id_comercio)s"
+        params['id_comercio'] = id_comercio
+
+    # El resto de la query funciona igual, ya que opera sobre los datos ya filtrados correctamente.
+    query = f"""
+        WITH PedidosEnRango AS (
+            SELECT p.*, u.porcentaje_comision 
+            FROM pedidos p
+            LEFT JOIN usuarios u ON p.repartidor_id = u.id_usuario
+            {filter_clauses}
+        ),
+        LogsDeEstado AS (
+            SELECT 
+                id_pedido, 
+                estado_registrado, 
+                timestamp_log,
+                LAG(timestamp_log, 1) OVER (PARTITION BY id_pedido ORDER BY timestamp_log) as prev_timestamp
+            FROM pedidos_logs
+            WHERE id_pedido IN (SELECT id FROM PedidosEnRango)
+        ),
+        TiemposPorPedido AS (
+            SELECT
+                id_pedido,
+                MAX(CASE WHEN estado_registrado = 'aceptado' THEN EXTRACT(EPOCH FROM (timestamp_log - prev_timestamp))/60 END) as t_aceptar,
+                MAX(CASE WHEN estado_registrado = 'retirando' THEN EXTRACT(EPOCH FROM (timestamp_log - prev_timestamp))/60 END) as t_retirar,
+                MAX(CASE WHEN estado_registrado = 'entregado' THEN EXTRACT(EPOCH FROM (timestamp_log - prev_timestamp))/60 END) as t_entregar
+            FROM LogsDeEstado
+            GROUP BY id_pedido
+        )
+        SELECT
+            COALESCE(SUM(costo_servicio), 0) as total_revenue,
+            COALESCE(SUM(costo_servicio * (porcentaje_comision / 100)), 0) as total_driver_commission,
+            COUNT(p.id) as total_orders,
+            COUNT(CASE WHEN p.estado = 'entregado' THEN 1 END) as completed_orders,
+            COUNT(CASE WHEN p.estado = 'cancelado' THEN 1 END) as cancelled_orders,
+            AVG(t.t_aceptar) as avg_time_to_accept_minutes,
+            AVG(t.t_retirar) as avg_time_to_pickup_minutes,
+            AVG(t.t_entregar) as avg_time_to_deliver_minutes
+        FROM PedidosEnRango p
+        LEFT JOIN TiemposPorPedido t ON p.id = t.id_pedido
+    """
+
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query, params)
+        results = cur.fetchone()
+
+        total_orders = results['total_orders']
+        cancellation_rate = (results['cancelled_orders'] / total_orders * 100) if total_orders > 0 else 0
+        
+        # Aplicamos la misma corrección de zona horaria a las sub-queries
+        cur.execute(f"SELECT COUNT(*) as total_tickets FROM tickets t JOIN pedidos p ON t.id_pedido = p.id {filter_clauses}", params)
+        total_tickets = cur.fetchone()['total_tickets']
+        
+        cur.execute(f"SELECT u.nombre_display, COUNT(p.id) as order_count FROM pedidos p JOIN usuarios u ON p.repartidor_id = u.id_usuario {filter_clauses} AND p.repartidor_id IS NOT NULL GROUP BY u.nombre_display ORDER BY order_count DESC LIMIT 5", params)
+        top_drivers = cur.fetchall()
+        
+        cur.execute(f"SELECT c.nombre, COUNT(p.id) as order_count FROM pedidos p JOIN comercios c ON p.id_comercio = c.id_comercio {filter_clauses} GROUP BY c.nombre ORDER BY order_count DESC LIMIT 5", params)
+        top_merchants = cur.fetchall()
+
+    net_revenue = results['total_revenue'] - results['total_driver_commission']
+    
+    response = AnalyticsResponse(
+        start_date=str(start_date),
+        end_date=str(end_date),
+        financials=FinancialMetrics(
+            total_revenue=results['total_revenue'],
+            total_driver_commission=results['total_driver_commission'],
+            net_revenue=net_revenue,
+        ),
+        operations=OperationalMetrics(
+            total_orders=total_orders,
+            completed_orders=results['completed_orders'],
+            cancelled_orders=results['cancelled_orders'],
+            cancellation_rate=cancellation_rate,
+            total_tickets=total_tickets,
+        ),
+        timing=TimingMetrics(
+            avg_time_to_accept_minutes=results.get('avg_time_to_accept_minutes'),
+            avg_time_to_pickup_minutes=results.get('avg_time_to_pickup_minutes'),
+            avg_time_to_deliver_minutes=results.get('avg_time_to_deliver_minutes'),
+        ),
+        top_drivers_by_orders=top_drivers,
+        top_merchants_by_orders=top_merchants,
+    )
+    
+    return response
+
+@app.post("/api-keys", response_model=NewApiKeyResponse, tags=["API Keys"])
+async def create_api_key(api_key_data: ApiKeyCreate, db=Depends(get_db)):
+    prefix = f"{api_key_data.client_name[:4].lower()}_sk"
+    secret = secrets.token_urlsafe(32)
+    full_key = f"{prefix}_{secret}"
+    hashed_key = pwd_context.hash(full_key)
+
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            # --- INICIO DE LA CORRECCIÓN ---
+            # 1. Revocar TODAS las claves antiguas para este cliente.
+            # Esto asegura que solo la nueva clave que vamos a crear estará activa.
+            cur.execute("UPDATE api_keys SET is_active = FALSE WHERE client_name = %s", (api_key_data.client_name,))
+            # --- FIN DE LA CORRECCIÓN ---
+
+            # 2. Insertar la nueva clave.
+            cur.execute(
+                "INSERT INTO api_keys (hashed_key, prefix, client_name) VALUES (%s, %s, %s)",
+                (hashed_key, prefix, api_key_data.client_name)
+            )
+            db.commit()
+            
+        return NewApiKeyResponse(
+            prefix=prefix,
+            full_key=full_key,
+            client_name=api_key_data.client_name,
+            message="Clave generada. ¡Guárdala ahora! No podrás verla de nuevo."
+        )
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api-keys/{prefix}/revoke", response_model=ApiKey, tags=["API Keys"])
+async def revoke_api_key(prefix: str, db=Depends(get_db)):
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("UPDATE api_keys SET is_active = FALSE WHERE prefix = %s RETURNING *", (prefix,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "Clave no encontrada")
+        revoked_key = cur.fetchone()
+        db.commit()
+        return ApiKey(**revoked_key)
+
+# --- ENDPOINTS CRUD PARA ZONAS RESTRINGIDAS ---
+
+@app.get("/zones", response_model=List[RestrictedZone], tags=["Zones"])
+async def list_restricted_zones(db=Depends(get_db)):
+    """Obtiene una lista de todas las zonas restringidas configuradas."""
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute("SELECT * FROM restricted_zones ORDER BY name ASC")
+        return [RestrictedZone(**row) for row in cur.fetchall()]
+
+@app.post("/zones", response_model=RestrictedZone, status_code=201, tags=["Zones"])
+async def create_restricted_zone(zone_data: RestrictedZoneCreate, db=Depends(get_db)):
+    """Crea una nueva zona restringida."""
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            query = """
+                INSERT INTO restricted_zones (name, is_active, polygon_coords, restricted_from, restricted_to)
+                VALUES (%s, %s, %s, %s, %s) RETURNING *;
+            """
+            cur.execute(query, (
+                zone_data.name, zone_data.is_active,
+                json.dumps(zone_data.polygon_coords),
+                zone_data.restricted_from, zone_data.restricted_to
+            ))
+            new_zone = cur.fetchone()
+            db.commit()
+            return RestrictedZone(**new_zone)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/zones/{zone_id}", response_model=RestrictedZone, tags=["Zones"])
+async def update_restricted_zone(zone_id: int, zone_data: RestrictedZoneUpdate, db=Depends(get_db)):
+    """Actualiza una zona restringida existente."""
+    update_dict = zone_data.model_dump(exclude_unset=True)
+    if not update_dict:
+        raise HTTPException(status_code=400, detail="No hay campos para actualizar")
+
+    if 'polygon_coords' in update_dict:
+        update_dict['polygon_coords'] = json.dumps(update_dict['polygon_coords'])
+
+    updates = [f"{key} = %s" for key in update_dict.keys()]
+    values = list(update_dict.values()) + [zone_id]
+    
+    query = f"UPDATE restricted_zones SET {', '.join(updates)}, updated_at = NOW() WHERE id = %s RETURNING *"
+    
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query, tuple(values))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Zona no encontrada")
+        updated_zone = cur.fetchone()
+        db.commit()
+        return RestrictedZone(**updated_zone)
+
+@app.delete("/zones/{zone_id}", status_code=200, tags=["Zones"])
+async def delete_restricted_zone(zone_id: int, db=Depends(get_db)):
+    """Elimina una zona restringida."""
+    with db.cursor() as cur:
+        cur.execute("DELETE FROM restricted_zones WHERE id = %s", (zone_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Zona no encontrada")
+        db.commit()
+    return {"status": "deleted", "id": zone_id}

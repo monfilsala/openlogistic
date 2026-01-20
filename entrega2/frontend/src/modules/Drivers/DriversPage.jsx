@@ -109,10 +109,10 @@ const DriversPage = () => {
   };
 
   return (
-    <div className="space-y-8">
-      <div className="flex justify-between items-center">
+    <div className="space-y-8 ">
+      <div className="flex justify-between items-center p-4 bg-white rounded-xl shadow-sm border">
         <div>
-          <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><Users size={28} /> Gestión de Flota</h1>
+          <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">Gestión de Flota</h1>
           <p className="text-sm text-slate-500">Administra y monitorea a tus repartidores.</p>
         </div>
         <div className="flex items-center gap-4">

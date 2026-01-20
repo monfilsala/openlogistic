@@ -83,8 +83,8 @@ const LogsPage = () => {
 
   return (
     <div className="space-y-6">
-      <div className="bg-white p-6 rounded-xl shadow-sm border">
-        <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><Activity/> Monitor del Sistema</h1>
+      <div className="bg-white p-4 rounded-xl shadow-sm border">
+        <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">Monitor del Sistema</h1>
         <p className="text-sm text-slate-500 mt-1">Visualiza eventos del sistema en vivo y consulta el historial de auditoría.</p>
       </div>
 

@@ -2,29 +2,35 @@ import React, { createContext, useEffect, useState, useRef, useContext } from 'r
 import apiClient from '../api/axiosConfig';
 
 export const WebSocketContext = createContext(null);
-
 export const useWebSocket = () => useContext(WebSocketContext);
+
+// Función HELPER para calcular repartidores activos
+const calculateActiveDrivers = (drivers) => {
+  const now = new Date();
+  const TEN_MINUTES_IN_MS = 10 * 60 * 1000;
+  if (!Array.isArray(drivers)) return 0;
+  return drivers.filter(driver => {
+    if (!driver.ultima_actualizacion_loc) return false;
+    const lastUpdate = new Date(driver.ultima_actualizacion_loc);
+    return (now - lastUpdate) < TEN_MINUTES_IN_MS;
+  }).length;
+};
 
 export const WebSocketProvider = ({ children }) => {
   const [lastMessage, setLastMessage] = useState(null);
   const [isConnected, setIsConnected] = useState(false);
-  
-  // Estado global para la aplicación
   const [liveOrders, setLiveOrders] = useState([]);
   const [drivers, setDrivers] = useState([]);
   const [metrics, setMetrics] = useState(null);
   const [alertConfig, setAlertConfig] = useState(null);
-
   const ws = useRef(null);
 
-  // Cargar configuración de alertas
   useEffect(() => {
     apiClient.get('/config/alert_thresholds_minutes')
       .then(res => setAlertConfig(res.data))
       .catch(() => console.error("CONFIGURACIÓN DE ALERTAS NO ENCONTRADA."));
   }, []);
 
-  // Cargar datos iniciales
   useEffect(() => {
     const fetchInitialData = async () => {
       try {
@@ -46,22 +52,11 @@ export const WebSocketProvider = ({ children }) => {
   useEffect(() => {
     function connect() {
       const wsUrl = `/ws/dashboard`;
-      
-      // --- INICIO DE LA CORRECCIÓN CLAVE ---
-      // Esta lógica detecta si la página es HTTPS y usa wss:// en consecuencia.
       const fullWsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}${wsUrl}`;
-      console.log("WebSocket: Intentando conectar a", fullWsUrl); // Deberías ver 'wss://' en la consola
-      // --- FIN DE LA CORRECCIÓN CLAVE ---
-
       ws.current = new WebSocket(fullWsUrl);
 
-      ws.current.onopen = () => {
-        console.log('✅ WebSocket Conectado');
-        setIsConnected(true);
-      };
-
+      ws.current.onopen = () => setIsConnected(true);
       ws.current.onclose = () => {
-        console.log('⚠️ WebSocket Desconectado. Reintentando en 5 segundos...');
         setIsConnected(false);
         setTimeout(connect, 5000);
       };
@@ -74,14 +69,25 @@ export const WebSocketProvider = ({ children }) => {
           switch (message.type) {
             case 'DRIVER_LOCATION_UPDATE': {
               const updatedDriver = message.data;
+              let newDriversList;
+              
               setDrivers(prev => {
                 const idx = prev.findIndex(d => d.id_usuario === updatedDriver.id_usuario);
                 if (idx > -1) {
                   const newDrivers = [...prev];
                   newDrivers[idx] = { ...newDrivers[idx], ultima_latitud: updatedDriver.latitud, ultima_longitud: updatedDriver.longitud, estado_actual: updatedDriver.estado, ultima_bateria_porcentaje: updatedDriver.bateria_porcentaje, ultima_actualizacion_loc: new Date().toISOString() };
+                  newDriversList = newDrivers;
                   return newDrivers;
                 }
-                return [...prev, { id_usuario: updatedDriver.id_usuario, nombre_display: updatedDriver.id_usuario, ultima_latitud: updatedDriver.latitud, ultima_longitud: updatedDriver.longitud, estado_actual: updatedDriver.estado, ultima_bateria_porcentaje: updatedDriver.bateria_porcentaje, ultima_actualizacion_loc: new Date().toISOString() }];
+                const newDriverEntry = { id_usuario: updatedDriver.id_usuario, nombre_display: updatedDriver.id_usuario, ultima_latitud: updatedDriver.latitud, ultima_longitud: updatedDriver.longitud, estado_actual: updatedDriver.estado, ultima_bateria_porcentaje: updatedDriver.bateria_porcentaje, ultima_actualizacion_loc: new Date().toISOString() };
+                newDriversList = [...prev, newDriverEntry];
+                return newDriversList;
+              });
+
+              setMetrics(prevMetrics => {
+                  if (!newDriversList) return prevMetrics; // Safety check
+                  const activeCount = calculateActiveDrivers(newDriversList);
+                  return { ...prevMetrics, drivers_activos: activeCount };
               });
               break;
             }
@@ -113,13 +119,9 @@ export const WebSocketProvider = ({ children }) => {
         }
       };
 
-      ws.current.onerror = (err) => {
-        console.error('❌ Error de WebSocket. La conexión se cerrará.');
-      };
+      ws.current.onerror = (err) => console.error('❌ Error de WebSocket.', err);
     }
-
     connect();
-
     return () => {
       if (ws.current) {
         ws.current.onclose = null;
@@ -130,9 +132,5 @@ export const WebSocketProvider = ({ children }) => {
 
   const value = { lastMessage, isConnected, liveOrders, drivers, metrics, alertConfig };
 
-  return (
-    <WebSocketContext.Provider value={value}>
-      {children}
-    </WebSocketContext.Provider>
-  );
+  return <WebSocketContext.Provider value={value}>{children}</WebSocketContext.Provider>;
 };

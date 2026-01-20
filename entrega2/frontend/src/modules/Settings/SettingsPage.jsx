@@ -58,8 +58,8 @@ const SettingsPage = () => {
   return (
     <div className="space-y-6">
       <div className="bg-white p-6 rounded-xl shadow-sm border">
-        <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><Settings/> Configuración General</h1>
-        <p className="text-sm text-slate-500 mt-1">Edita parámetros críticos del sistema como tarifas, roles y más.</p>
+        <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">Configuración General</h1>
+        <p className="text-sm text-slate-500 mt-1">Edita parámetros críticos del sistema como tarifas, alertas y más.</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-4 gap-6 h-[calc(100vh-250px)]">

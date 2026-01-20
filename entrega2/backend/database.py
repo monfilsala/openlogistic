@@ -268,6 +268,18 @@ def db_exists():
     finally:
         if conn_admin: conn_admin.close()
 
+def get_db():
+    """
+    Dependencia de FastAPI que gestiona el ciclo de vida de la conexión a la base de datos.
+    """
+    conn = None
+    try:
+        conn = get_db_connection()
+        yield conn
+    finally:
+        if conn:
+            conn.close()
+
 def create_db_if_not_exists():
     if not db_exists():
         conn_admin = get_db_connection(ADMIN_DB_NAME)
@@ -281,64 +293,116 @@ def create_db_if_not_exists():
 def create_tables_if_not_exist():
     """Define y crea todas las tablas necesarias."""
     commands = (
-        "CREATE TABLE IF NOT EXISTS usuarios (id_usuario VARCHAR(255) PRIMARY KEY, nombre_display VARCHAR(255), ultima_latitud DOUBLE PRECISION, ultima_longitud DOUBLE PRECISION, ultima_actualizacion_loc TIMESTAMP WITH TIME ZONE, estado_actual VARCHAR(50) DEFAULT 'Disponible', porcentaje_comision DOUBLE PRECISION DEFAULT 0.0, ultima_bateria_porcentaje INTEGER, fcm_token TEXT);",
-        "CREATE TABLE IF NOT EXISTS comercios (id_comercio VARCHAR(255) PRIMARY KEY, nombre VARCHAR(255) NOT NULL, direccion TEXT, latitud DOUBLE PRECISION, longitud DOUBLE PRECISION, numero_contacto VARCHAR(50));",
-        """CREATE TABLE IF NOT EXISTS pedidos (
-            id SERIAL PRIMARY KEY,
-            pedido TEXT NOT NULL,
-            direccion_entrega TEXT NOT NULL,
-            latitud_entrega DOUBLE PRECISION NOT NULL,
-            longitud_entrega DOUBLE PRECISION NOT NULL,
-            latitud_retiro DOUBLE PRECISION NOT NULL,
-            longitud_retiro DOUBLE PRECISION NOT NULL,
-            estado VARCHAR(50) DEFAULT 'pendiente',
-            estado_previo_novedad VARCHAR(50),
-            fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-            detalles TEXT,
-            telefono_contacto VARCHAR(50),
-            telefono_comercio VARCHAR(50),
-            link_maps TEXT,
-            id_comercio VARCHAR(255) NOT NULL,
-            costo_servicio DOUBLE PRECISION,
-            repartidor_id VARCHAR(255),
-            tiene_ticket_abierto BOOLEAN DEFAULT FALSE,
-            tipo_vehiculo VARCHAR(20) NOT NULL,
-            creado_por_usuario_id VARCHAR(255),
-            FOREIGN KEY (repartidor_id) REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
-            FOREIGN KEY (id_comercio) REFERENCES comercios(id_comercio) ON DELETE CASCADE
-        );""",
-        "CREATE TABLE IF NOT EXISTS ubicaciones_log (id_log SERIAL PRIMARY KEY, id_usuario VARCHAR(255) NOT NULL, latitud DOUBLE PRECISION NOT NULL, longitud DOUBLE PRECISION NOT NULL, timestamp TIMESTAMP WITH TIME ZONE NOT NULL, FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario) ON DELETE CASCADE);",
-        "CREATE TABLE IF NOT EXISTS tickets (id_ticket SERIAL PRIMARY KEY, id_pedido INTEGER NOT NULL, id_usuario_creador VARCHAR(255) NOT NULL, estado_ticket VARCHAR(50) DEFAULT 'abierto', fecha_creacion_ticket TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, asunto_ticket TEXT, FOREIGN KEY (id_pedido) REFERENCES pedidos(id) ON DELETE CASCADE, FOREIGN KEY (id_usuario_creador) REFERENCES usuarios(id_usuario) ON DELETE CASCADE);",
-        "CREATE TABLE IF NOT EXISTS mensajes_ticket (id_mensaje SERIAL PRIMARY KEY, id_ticket INTEGER NOT NULL, id_remitente VARCHAR(255) NOT NULL, tipo_remitente VARCHAR(50) NOT NULL, contenido_mensaje TEXT, nombre_archivo_adjunto VARCHAR(255), timestamp_mensaje TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (id_ticket) REFERENCES tickets(id_ticket) ON DELETE CASCADE);",
-        "CREATE TABLE IF NOT EXISTS pedidos_logs (log_id SERIAL PRIMARY KEY, id_pedido INTEGER NOT NULL, repartidor_id VARCHAR(255), estado_registrado VARCHAR(50) NOT NULL, latitud DOUBLE PRECISION, longitud DOUBLE PRECISION, timestamp_log TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (id_pedido) REFERENCES pedidos(id) ON DELETE CASCADE);",
-        "CREATE TABLE IF NOT EXISTS integraciones (pedido_id INTEGER PRIMARY KEY, id_externo VARCHAR(255) NOT NULL, fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE);",
-        "CREATE TABLE IF NOT EXISTS system_logs (id SERIAL PRIMARY KEY, nivel VARCHAR(20) NOT NULL, accion VARCHAR(100) NOT NULL, usuario_responsable VARCHAR(255), detalles JSONB, timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);",
-        "CREATE TABLE IF NOT EXISTS app_config (clave VARCHAR(100) PRIMARY KEY, valor JSONB NOT NULL, updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);",
-        "CREATE TABLE IF NOT EXISTS pedidos_programados (id SERIAL PRIMARY KEY, payload_pedido JSONB NOT NULL, fecha_liberacion TIMESTAMP WITH TIME ZONE NOT NULL, estado VARCHAR(50) DEFAULT 'pendiente', fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);",
-        """
-        CREATE TABLE IF NOT EXISTS integration_configs (
-            id SERIAL PRIMARY KEY,
-            name VARCHAR(100) NOT NULL UNIQUE,
-            is_active BOOLEAN DEFAULT TRUE,
-            id_externo_prefix VARCHAR(50) NOT NULL UNIQUE,
-            webhooks JSONB,
-            created_at TIMESTAMPTZ DEFAULT NOW(),
-            updated_at TIMESTAMPTZ DEFAULT NOW()
-        );
-        """,
-        # --- Bloque de Migración para futuras modificaciones ---
-        """
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='pedidos' AND column_name='fecha_actualizacion') THEN
-                ALTER TABLE pedidos ADD COLUMN fecha_actualizacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
-            END IF;
-        END $$;
-        """,
-        # --- Índices para optimizar búsquedas ---
-        "CREATE INDEX IF NOT EXISTS idx_integration_configs_prefix ON integration_configs(id_externo_prefix);",
-        "CREATE INDEX IF NOT EXISTS idx_integraciones_id_externo ON integraciones(id_externo);"
-    )
+    "CREATE TABLE IF NOT EXISTS usuarios (id_usuario VARCHAR(255) PRIMARY KEY, nombre_display VARCHAR(255), ultima_latitud DOUBLE PRECISION, ultima_longitud DOUBLE PRECISION, ultima_actualizacion_loc TIMESTAMP WITH TIME ZONE, estado_actual VARCHAR(50) DEFAULT 'Disponible', porcentaje_comision DOUBLE PRECISION DEFAULT 0.0, ultima_bateria_porcentaje INTEGER, fcm_token TEXT);",
+    "CREATE TABLE IF NOT EXISTS comercios (id_comercio VARCHAR(255) PRIMARY KEY, nombre VARCHAR(255) NOT NULL, direccion TEXT, latitud DOUBLE PRECISION, longitud DOUBLE PRECISION, numero_contacto VARCHAR(50));",
+    """CREATE TABLE IF NOT EXISTS pedidos (
+        id SERIAL PRIMARY KEY,
+        pedido TEXT NOT NULL,
+        direccion_entrega TEXT NOT NULL,
+        latitud_entrega DOUBLE PRECISION NOT NULL,
+        longitud_entrega DOUBLE PRECISION NOT NULL,
+        latitud_retiro DOUBLE PRECISION NOT NULL,
+        longitud_retiro DOUBLE PRECISION NOT NULL,
+        estado VARCHAR(50) DEFAULT 'pendiente',
+        estado_previo_novedad VARCHAR(50),
+        fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        fecha_actualizacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+        detalles TEXT,
+        telefono_contacto VARCHAR(50),
+        telefono_comercio VARCHAR(50),
+        link_maps TEXT,
+        id_comercio VARCHAR(255) NOT NULL,
+        costo_servicio DOUBLE PRECISION,
+        repartidor_id VARCHAR(255),
+        tiene_ticket_abierto BOOLEAN DEFAULT FALSE,
+        tipo_vehiculo VARCHAR(20) NOT NULL,
+        creado_por_usuario_id VARCHAR(255),
+        FOREIGN KEY (repartidor_id) REFERENCES usuarios(id_usuario) ON DELETE SET NULL,
+        FOREIGN KEY (id_comercio) REFERENCES comercios(id_comercio) ON DELETE CASCADE
+    );""",
+    """
+    CREATE TABLE IF NOT EXISTS admin_users (
+        uid VARCHAR(255) PRIMARY KEY,
+        email VARCHAR(255) NOT NULL UNIQUE,
+        display_name VARCHAR(255),
+        role VARCHAR(50) DEFAULT 'viewer',
+        is_disabled BOOLEAN DEFAULT FALSE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS restricted_zones (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL,
+        is_active BOOLEAN DEFAULT TRUE,
+        -- Guardaremos las coordenadas del polígono como un array de puntos en JSONB
+        -- Ejemplo: [[-66.90, 10.48], [-66.88, 10.48], [-66.88, 10.46], [-66.90, 10.46]]
+        polygon_coords JSONB NOT NULL,
+        -- Horarios en formato 24h (ej: '08:00', '22:30')
+        restricted_from TIME, -- Puede ser NULL si está prohibido 24/7
+        restricted_to TIME,   -- Puede ser NULL si está prohibido 24/7
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    """,
+    "CREATE TABLE IF NOT EXISTS ubicaciones_log (id_log SERIAL PRIMARY KEY, id_usuario VARCHAR(255) NOT NULL, latitud DOUBLE PRECISION NOT NULL, longitud DOUBLE PRECISION NOT NULL, timestamp TIMESTAMP WITH TIME ZONE NOT NULL, FOREIGN KEY (id_usuario) REFERENCES usuarios(id_usuario) ON DELETE CASCADE);",
+    "CREATE TABLE IF NOT EXISTS tickets (id_ticket SERIAL PRIMARY KEY, id_pedido INTEGER NOT NULL, id_usuario_creador VARCHAR(255) NOT NULL, estado_ticket VARCHAR(50) DEFAULT 'abierto', fecha_creacion_ticket TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, asunto_ticket TEXT, FOREIGN KEY (id_pedido) REFERENCES pedidos(id) ON DELETE CASCADE, FOREIGN KEY (id_usuario_creador) REFERENCES usuarios(id_usuario) ON DELETE CASCADE);",
+    "CREATE TABLE IF NOT EXISTS mensajes_ticket (id_mensaje SERIAL PRIMARY KEY, id_ticket INTEGER NOT NULL, id_remitente VARCHAR(255) NOT NULL, tipo_remitente VARCHAR(50) NOT NULL, contenido_mensaje TEXT, nombre_archivo_adjunto VARCHAR(255), timestamp_mensaje TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (id_ticket) REFERENCES tickets(id_ticket) ON DELETE CASCADE);",
+    "CREATE TABLE IF NOT EXISTS pedidos_logs (log_id SERIAL PRIMARY KEY, id_pedido INTEGER NOT NULL, repartidor_id VARCHAR(255), estado_registrado VARCHAR(50) NOT NULL, latitud DOUBLE PRECISION, longitud DOUBLE PRECISION, timestamp_log TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (id_pedido) REFERENCES pedidos(id) ON DELETE CASCADE);",
+    "CREATE TABLE IF NOT EXISTS integraciones (pedido_id INTEGER PRIMARY KEY, id_externo VARCHAR(255) NOT NULL, fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP, FOREIGN KEY (pedido_id) REFERENCES pedidos(id) ON DELETE CASCADE);",
+    "CREATE TABLE IF NOT EXISTS system_logs (id SERIAL PRIMARY KEY, nivel VARCHAR(20) NOT NULL, accion VARCHAR(100) NOT NULL, usuario_responsable VARCHAR(255), detalles JSONB, timestamp TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);",
+    "CREATE TABLE IF NOT EXISTS app_config (clave VARCHAR(100) PRIMARY KEY, valor JSONB NOT NULL, updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);",
+    "CREATE TABLE IF NOT EXISTS pedidos_programados (id SERIAL PRIMARY KEY, payload_pedido JSONB NOT NULL, fecha_liberacion TIMESTAMP WITH TIME ZONE NOT NULL, estado VARCHAR(50) DEFAULT 'pendiente', fecha_creacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP);",
+    """
+    CREATE TABLE IF NOT EXISTS integration_configs (
+        id SERIAL PRIMARY KEY,
+        name VARCHAR(100) NOT NULL UNIQUE,
+        is_active BOOLEAN DEFAULT TRUE,
+        id_externo_prefix VARCHAR(50) NOT NULL,
+        webhooks JSONB,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        updated_at TIMESTAMPTZ DEFAULT NOW()
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS api_keys (
+        id SERIAL PRIMARY KEY,
+        hashed_key VARCHAR(255) NOT NULL UNIQUE,
+        prefix VARCHAR(8) NOT NULL,
+        client_name VARCHAR(100) NOT NULL,
+        is_active BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMPTZ DEFAULT NOW(),
+        last_used_at TIMESTAMPTZ
+    );
+    """,
+
+    # --- Bloque de Migración para asegurar la consistencia del esquema ---
+    """
+    DO $$
+    BEGIN
+        -- Asegurar que la columna 'fecha_actualizacion' exista en 'pedidos'
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='pedidos' AND column_name='fecha_actualizacion') THEN
+            ALTER TABLE pedidos ADD COLUMN fecha_actualizacion TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
+        END IF;
+
+        -- Eliminar la restricción UNIQUE de 'id_externo_prefix' en integration_configs si existe
+        IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name='integration_configs_id_externo_prefix_key') THEN
+            ALTER TABLE integration_configs DROP CONSTRAINT integration_configs_id_externo_prefix_key;
+        END IF;
+
+        -- Eliminar la restricción UNIQUE de 'prefix' en api_keys si existe
+        IF EXISTS (SELECT 1 FROM information_schema.table_constraints WHERE constraint_name='api_keys_prefix_key') THEN
+            ALTER TABLE api_keys DROP CONSTRAINT api_keys_prefix_key;
+        END IF;
+    END $$;
+    """,
+
+    # --- Índices para optimizar búsquedas ---
+    "CREATE INDEX IF NOT EXISTS idx_integration_configs_prefix ON integration_configs(id_externo_prefix);",
+    "CREATE INDEX IF NOT EXISTS idx_integraciones_id_externo ON integraciones(id_externo);",
+    "CREATE INDEX IF NOT EXISTS idx_api_keys_prefix ON api_keys(prefix);"
+)
     conn = get_db_connection()
     conn.autocommit = True
     try:

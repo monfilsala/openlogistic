@@ -1,9 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import apiClient from '../../../api/axiosConfig';
-import { X, Save, AlertTriangle, Info, ToggleRight, History, Clock, MapPin, Store, ExternalLink, User, DollarSign } from 'lucide-react';
+import { X, Save, AlertTriangle, Info, ToggleRight, History, Clock, MapPin, Store, ExternalLink, User, DollarSign, Share2, Zap } from 'lucide-react'; // <-- Añadido Share2 y Zap
 
-// --- Sub-Componentes para Organización ---
-
+// --- Sub-Componentes para Organización (Sin cambios) ---
 const InfoField = ({ label, value, isLink = false }) => (
   <div>
     <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider">{label}</label>
@@ -18,21 +17,20 @@ const InfoField = ({ label, value, isLink = false }) => (
 );
 
 const EditableField = ({ label, name, value, onChange, type = "text", as = "input", step = "any" }) => (
-  <div>
-    <label className="block text-xs font-bold text-slate-500 uppercase mb-1">{label}</label>
-    {as === 'textarea' ? (
-      <textarea name={name} value={value} onChange={onChange} rows="2" className="w-full p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
-    ) : (
-      <input type={type} name={name} value={value} onChange={onChange} step={step} className="w-full p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
-    )}
-  </div>
+    <div>
+        <label className="block text-xs font-bold text-slate-500 uppercase mb-1">{label}</label>
+        {as === 'textarea' ? (
+            <textarea name={name} value={value} onChange={onChange} rows="2" className="w-full p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+        ) : (
+            <input type={type} name={name} value={value} onChange={onChange} step={step} className="w-full p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all" />
+        )}
+    </div>
 );
 
-// --- Componente Principal del Modal ---
+
 const EditOrderModal = ({ order, isOpen, onClose, onOrderUpdated, drivers = [] }) => {
   const [activeTab, setActiveTab] = useState('info');
   
-  // --- MODIFICADO: Añadir campos de coordenadas al estado inicial ---
   const initialFormState = {
     pedido: '', telefono_contacto: '', telefono_comercio: '',
     costo_servicio: 0, detalles: '', repartidor_id: '',
@@ -48,7 +46,6 @@ const EditOrderModal = ({ order, isOpen, onClose, onOrderUpdated, drivers = [] }
   useEffect(() => {
     if (isOpen && order) {
       setActiveTab('info');
-      // --- MODIFICADO: Poblar el estado con las coordenadas del pedido ---
       setFormData({
         pedido: order.pedido || '',
         telefono_contacto: order.telefono_contacto || '',
@@ -92,10 +89,7 @@ const EditOrderModal = ({ order, isOpen, onClose, onOrderUpdated, drivers = [] }
       if (isStatusChange) {
         endpoint = `/pedidos/${order.id}/estado`;
         method = 'patch';
-        payload = {
-          estado: updateData.estado,
-          repartidor_id: order.repartidor_id || null 
-        };
+        payload = { estado: updateData.estado, repartidor_id: order.repartidor_id || null };
       } else {
         endpoint = `/pedidos/${order.id}`;
         method = 'put';
@@ -131,13 +125,28 @@ const EditOrderModal = ({ order, isOpen, onClose, onOrderUpdated, drivers = [] }
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 p-4 animate-in fade-in duration-200">
       <div className="bg-white rounded-xl w-full max-w-4xl h-[90vh] flex flex-col shadow-2xl border border-slate-200">
         
-        <div className="px-6 py-4 border-b flex justify-between items-center bg-slate-50 rounded-t-xl">
+        {/* --- INICIO DE LA CORRECCIÓN --- */}
+        <div className="px-6 py-4 border-b flex justify-between items-start bg-slate-50 rounded-t-xl">
           <div>
             <h3 className="font-bold text-lg text-slate-800">Centro de Control: Pedido #{order?.id}</h3>
-            <p className="text-xs text-slate-500">{order?.nombre_comercio}</p>
+            <p className="text-xs text-slate-500 mb-2">{order?.nombre_comercio}</p>
+            
+            {/* Lógica condicional para mostrar el origen del pedido */}
+            {order?.id_externo ? (
+                <div className="flex items-center gap-1.5 text-xs font-semibold bg-purple-100 text-purple-800 px-2 py-1 rounded-full w-fit">
+                    <Share2 size={12} />
+                    <span>ID Externo: {order.id_externo}</span>
+                </div>
+            ) : (
+                <div className="flex items-center gap-1.5 text-xs font-medium bg-slate-100 text-slate-600 px-2 py-1 rounded-full w-fit">
+                    <Zap size={12} />
+                    <span>Servicio Interno</span>
+                </div>
+            )}
           </div>
           <button onClick={onClose} className="p-2 rounded-full hover:bg-slate-200 transition-colors"><X size={20}/></button>
         </div>
+        {/* --- FIN DE LA CORRECCIÓN --- */}
         
         <div className="px-6 border-b flex">
           <TabButton tabName="info" label="Información General" icon={Info} />
@@ -169,33 +178,23 @@ const EditOrderModal = ({ order, isOpen, onClose, onOrderUpdated, drivers = [] }
                   <h3 className="font-bold text-slate-700 flex items-center gap-2"><Store size={18} className="text-orange-500"/> Punto de Retiro</h3>
                   <InfoField label="Comercio" value={order.nombre_comercio} />
                   <EditableField label="Teléfono Comercio" name="telefono_comercio" value={formData.telefono_comercio} onChange={e => setFormData({...formData, telefono_comercio: e.target.value})}/>
-                  
-                  {/* --- MODIFICADO: Coordenadas de retiro editables --- */}
                   <div className="grid grid-cols-2 gap-4">
                     <EditableField label="Latitud Retiro" name="latitud_retiro" value={formData.latitud_retiro} onChange={e => setFormData({...formData, latitud_retiro: e.target.value})} type="number"/>
                     <EditableField label="Longitud Retiro" name="longitud_retiro" value={formData.longitud_retiro} onChange={e => setFormData({...formData, longitud_retiro: e.target.value})} type="number"/>
                   </div>
-
                   <InfoField label="Link Google Maps" value={generateMapsLink(order.latitud_retiro, order.longitud_retiro)} isLink={true} />
                 </div>
                 <div className="bg-white p-5 rounded-xl border space-y-4">
                   <h3 className="font-bold text-slate-700 flex items-center gap-2"><MapPin size={18} className="text-blue-500"/> Punto de Entrega</h3>
                   <EditableField label="Teléfono Cliente" name="telefono_contacto" value={formData.telefono_contacto} onChange={e => setFormData({...formData, telefono_contacto: e.target.value})}/>
-                  
-                  {/* --- MODIFICADO: Coordenadas de entrega editables --- */}
                    <div className="grid grid-cols-2 gap-4">
                     <EditableField label="Latitud Entrega" name="latitud_entrega" value={formData.latitud_entrega} onChange={e => setFormData({...formData, latitud_entrega: e.target.value})} type="number"/>
                     <EditableField label="Longitud Entrega" name="longitud_entrega" value={formData.longitud_entrega} onChange={e => setFormData({...formData, longitud_entrega: e.target.value})} type="number"/>
                   </div>
-
                   <InfoField label="Link Google Maps" value={order.link_maps || generateMapsLink(order.latitud_entrega, order.longitud_entrega)} isLink={true} />
                 </div>
               </div>
-              <div className="flex justify-end pt-4">
-                  <button type="submit" disabled={loading} className="px-6 py-2.5 bg-blue-600 text-white rounded-lg font-medium flex items-center gap-2 shadow-md hover:bg-blue-700 disabled:bg-slate-400">
-                      <Save size={16}/> {loading ? 'Guardando...' : 'Guardar Cambios'}
-                  </button>
-              </div>
+              <div className="flex justify-end pt-4"><button type="submit" disabled={loading} className="px-6 py-2.5 bg-blue-600 text-white rounded-lg font-medium flex items-center gap-2 shadow-md hover:bg-blue-700 disabled:bg-slate-400"><Save size={16}/> {loading ? 'Guardando...' : 'Guardar Cambios'}</button></div>
             </form>
           )}
           {activeTab === 'status' && order && (

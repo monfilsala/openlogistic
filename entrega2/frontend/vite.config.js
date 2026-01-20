@@ -19,7 +19,7 @@ export default defineConfig(({ mode }) => {
         protocol: 'wss',
         // Codespaces provee esta variable de entorno con el host público correcto
         // Si no estás en Codespaces, esto será undefined y Vite usará un fallback
-        host: env.CODESPACE_NAME ? `${env.CODESPACE_NAME}-3000.${env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}` : 'localhost',
+        host: env.CODESPACE_NAME ? `${env.CODESPACE_NAME}-3000.${env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN}` : 'fuzzy-dollop-vr9pwqx9rw4cx66-3000.app.github.dev',
         clientPort: 443
       },
       // --- FIN DE LA CONFIGURACIÓN HMR ---

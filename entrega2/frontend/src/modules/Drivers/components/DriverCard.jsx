@@ -65,7 +65,9 @@ const DriverCard = ({ driver, onClick }) => {
             doubleClickZoom={false}
             style={{ height: '100%', width: '100%' }}
           >
-            <TileLayer url="https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png" />
+            <TileLayer
+              url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            />
             <Marker position={[driver.ultima_latitud, driver.ultima_longitud]} icon={smallIcon} />
           </MapContainer>
         ) : (
@@ -99,7 +101,7 @@ const DriverCard = ({ driver, onClick }) => {
           </div>
         )}
       </div>
-    </button> // <-- ¡ETIQUETA DE CIERRE AÑADIDA AQUÍ!
+    </button>
   );
 };
 

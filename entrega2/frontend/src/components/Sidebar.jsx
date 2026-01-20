@@ -1,20 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/AuthContext'; // <-- CORRECCIÓN: Ruta de importación corregida
 
 import { 
-  LayoutDashboard, 
-  ShoppingBag, 
-  Users, 
-  Settings, 
-  ChevronDown, 
-  ChevronRight, 
-  Map, 
-  FileText,
-  LifeBuoy,
-  LogOut,
-  Shield,
-  Store
+  LayoutDashboard, ShoppingBag, Users, Settings, PieChart,
+  ChevronDown, ChevronRight, Map, FileText, LifeBuoy, LogOut, Shield, Store, Share2
 } from 'lucide-react';
 
 const MenuItem = ({ icon: Icon, label, to, subItems }) => {
@@ -22,7 +12,7 @@ const MenuItem = ({ icon: Icon, label, to, subItems }) => {
   const location = useLocation();
 
   const hasSubItems = subItems && subItems.length > 0;
-  const isParentActive = hasSubItems && subItems.some(item => location.pathname.startsWith(item.to));
+  const isParentActive = hasSubItems && (location.pathname === to || subItems.some(item => location.pathname.startsWith(item.to)));
   
   const toggleSubMenu = (e) => {
     if (hasSubItems) {
@@ -79,24 +69,18 @@ const MenuItem = ({ icon: Icon, label, to, subItems }) => {
 };
 
 const Sidebar = () => {
-  const { currentUser: user, logout } = useAuth();
+  const { currentUser: user, logout, hasPermission } = useAuth();
 
-  // --- LÓGICA DE NOMBRES MEJORADA ---
   const getUserDisplayName = () => {
-    if (user?.displayName) {
-      return user.displayName;
-    }
-    if (user?.email) {
-      // Devuelve la parte del email antes del '@'
-      return user.email.split('@')[0];
-    }
-    return 'Usuario'; // Fallback final
+    if (user?.displayName) return user.displayName;
+    if (user?.email) return user.email.split('@')[0];
+    return 'Usuario';
   };
 
   const getInitials = () => {
     const name = getUserDisplayName();
     const names = name.split(' ');
-    if (names.length > 1) {
+    if (names.length > 1 && names[1]) {
       return (names[0][0] + names[1][0]).toUpperCase();
     }
     return name.substring(0, 2).toUpperCase();
@@ -116,35 +100,52 @@ const Sidebar = () => {
 
       <nav className="flex-1 px-4 py-6 space-y-2">
         <p className="px-4 text-xs font-bold text-slate-500 uppercase tracking-wider mb-2">Principal</p>
-        <MenuItem icon={LayoutDashboard} label="Dashboard" to="/" />
-        <MenuItem 
-          icon={ShoppingBag} 
-          label="Pedidos" 
-          to="/pedidos"
-          subItems={[
-            { label: 'Todos los Pedidos', to: '/pedidos' },
-            { label: 'Programados', to: '/pedidos/programados' },
-            { label: 'Historial', to: '/pedidos/historial' }
-          ]} 
-        />
-        <p className="px-4 text-xs font-bold text-slate-500 uppercase tracking-wider mt-6 mb-2">Operaciones</p>
-        <MenuItem icon={Users} label="Repartidores" to="/conductores"/>
-        <MenuItem icon={Store} label="Comercios" to="/comercios"/>
-        <MenuItem icon={Map} label="Mapa en Vivo" to="/mapa" />
-        <MenuItem icon={LifeBuoy} label="Soporte / Tickets" to="/soporte" />
-        <p className="px-4 text-xs font-bold text-slate-500 uppercase tracking-wider mt-6 mb-2">Sistema</p>
-        <MenuItem icon={FileText} label="Reportes" to="/reportes" />
-        <MenuItem 
-          icon={Settings} 
-          label="Administración" 
-          to="/configuracion"
-          subItems={[
-            { label: 'Gestión de Accesos', to: '/access' },
-            { label: 'Integraciones API', to: '/integrations' },
-            { label: 'Configuración', to: '/configuracion' },
-            { label: 'Logs del Sistema', to: '/logs' },
-          ]} 
-        />
+        
+        {hasPermission('dashboard:view') && <MenuItem icon={LayoutDashboard} label="Dashboard" to="/" />}
+        
+        {hasPermission('orders:view') && (
+          <MenuItem 
+            icon={ShoppingBag} 
+            label="Pedidos" 
+            to="/pedidos"
+            subItems={[
+              { label: 'Todos los Pedidos', to: '/pedidos' },
+              { label: 'Programados', to: '/pedidos/programados' },
+              { label: 'Historial', to: '/pedidos/historial' }
+            ].filter(Boolean)} 
+          />
+        )}
+        
+        {(hasPermission('drivers:view') || hasPermission('merchants:view') || hasPermission('map:view') || hasPermission('support:view')) && (
+          <p className="px-4 text-xs font-bold text-slate-500 uppercase tracking-wider mt-6 mb-2">Operaciones</p>
+        )}
+        
+        {hasPermission('drivers:view') && <MenuItem icon={Users} label="Repartidores" to="/conductores"/>}
+        {hasPermission('merchants:view') && <MenuItem icon={Store} label="Comercios" to="/comercios"/>}
+        {hasPermission('map:view') && <MenuItem icon={Map} label="Mapa en Vivo" to="/mapa" />}
+        {hasPermission('support:view') && <MenuItem icon={LifeBuoy} label="Soporte / Tickets" to="/soporte" />}
+
+        {(hasPermission('analytics:view') || hasPermission('reports:view') || hasPermission('settings:view')) && (
+          <p className="px-4 text-xs font-bold text-slate-500 uppercase tracking-wider mt-6 mb-2">Sistema</p>
+        )}
+
+        {hasPermission('analytics:view') && <MenuItem icon={PieChart} label="Estadísticas" to="/analytics" />} 
+        {hasPermission('reports:view') && <MenuItem icon={FileText} label="Reportes" to="/reportes" />}
+        
+        {(hasPermission('access:view') || hasPermission('settings:view') || hasPermission('integrations:view')) && (
+          <MenuItem 
+            icon={Settings} 
+            label="Administración" 
+            to="#"
+            subItems={[
+              hasPermission('access:view') && { label: 'Gestión de Accesos', to: '/access' },
+              hasPermission('integrations:view') && { label: 'Integraciones API', to: '/integrations' },
+              hasPermission('settings:view') && { label: 'Configuración', to: '/configuracion' },
+              hasPermission('settings:view') && { label: 'Logs del Sistema', to: '/logs' },
+              hasPermission('zones:view') && { label: 'Zonas', to: '/zonas' },
+            ].filter(Boolean)}
+          />
+        )}
       </nav>
 
       <div className="p-4 border-t border-slate-800 bg-slate-900">

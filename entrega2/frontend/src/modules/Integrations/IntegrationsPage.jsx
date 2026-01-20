@@ -31,9 +31,11 @@ const IntegrationsPage = () => {
         setSelectedIntegration(null);
     };
 
-    const handleSave = () => {
-        handleCloseModal();
-        fetchIntegrations();
+    // --- CORRECCIÓN CLAVE ---
+    // Esta función se llama después de cualquier acción exitosa en el modal.
+    const handleActionSuccess = () => {
+        handleCloseModal(); // Cierra el modal
+        fetchIntegrations(); // Y luego refresca la lista.
     };
 
     const handleDelete = async (integration) => {
@@ -50,9 +52,9 @@ const IntegrationsPage = () => {
 
     return (
         <div className="space-y-6">
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center p-4 bg-white rounded-xl shadow-sm border">
                 <div>
-                    <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><Share2 /> Integraciones API (Webhooks)</h1>
+                    <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">Integraciones API (Webhooks)</h1>
                     <p className="text-sm text-slate-500">Conecta tu sistema con plataformas externas para notificar cambios de estado.</p>
                 </div>
                 <button onClick={() => handleOpenModal()} className="bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-blue-700 font-medium">
@@ -98,7 +100,10 @@ const IntegrationsPage = () => {
                 <IntegrationModal
                     isOpen={isModalOpen}
                     onClose={handleCloseModal}
-                    onSave={handleSave}
+                    // La prop 'onSave' ahora se llama 'onSuccess' para ser más genérica
+                    onSuccess={fetchIntegrations}
+                    // Y pasamos una prop específica para cuando el formulario principal se guarda
+                    onFormSubmitSuccess={handleActionSuccess}
                     integration={selectedIntegration}
                 />
             )}

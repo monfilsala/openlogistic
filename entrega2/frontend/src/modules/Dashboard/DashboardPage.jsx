@@ -23,14 +23,10 @@ const DashboardPage = () => {
 
   return (
     <div className="space-y-6">
-      <div className="flex justify-between items-center">
+      <div className="flex justify-between items-center p-4 bg-white rounded-xl shadow-sm border">
         <div>
           <h1 className="text-2xl font-bold text-slate-800">Panel de Control</h1>
           <p className="text-sm text-slate-500">Visión general de operaciones en tiempo real</p>
-        </div>
-        <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold ${isConnected ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
-          {isConnected ? <Wifi size={14}/> : <WifiOff size={14}/>}
-          {isConnected ? 'Conectado' : 'Reconectando...'}
         </div>
       </div>
       

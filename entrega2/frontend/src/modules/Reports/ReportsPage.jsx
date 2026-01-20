@@ -147,7 +147,7 @@ const ReportsPage = () => {
     return (
         <div className="space-y-6">
             <div className="bg-white p-6 rounded-xl shadow-sm border">
-                <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><BarChart/> Generador de Reportes</h1>
+                <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2">Generador de Reportes</h1>
                 <p className="text-sm text-slate-500 mt-1">Construye, visualiza y descarga reportes personalizados.</p>
             </div>
 

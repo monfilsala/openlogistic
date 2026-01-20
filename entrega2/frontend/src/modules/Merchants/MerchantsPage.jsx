@@ -50,7 +50,7 @@ const MerchantsPage = () => {
 
     return (
         <div className="space-y-6">
-            <div className="flex justify-between items-center">
+            <div className="flex justify-between items-center p-4 bg-white rounded-xl shadow-sm border">
                 <div>
                     <h1 className="text-2xl font-bold text-slate-800 flex items-center gap-2"><Store size={24} /> Gestión de Comercios</h1>
                     <p className="text-sm text-slate-500">Administra los puntos de retiro de tus clientes.</p>

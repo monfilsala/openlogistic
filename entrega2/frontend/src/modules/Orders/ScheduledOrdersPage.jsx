@@ -176,7 +176,7 @@ const ScheduledOrdersPage = () => {
     <div className="space-y-6">
       <div className="flex justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-slate-200">
         <div>
-          <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2"><Calendar size={24} className="text-blue-600" /> Pedidos Programados</h1>
+          <h1 className="text-xl font-bold text-slate-800 flex items-center gap-2">Pedidos Programados</h1>
           <p className="text-sm text-slate-500">Planifica envíos futuros para su liberación automática</p>
         </div>
         <button onClick={() => handleOpenModal()} className="bg-blue-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-blue-700 font-medium transition-colors shadow-sm">

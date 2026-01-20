@@ -1,7 +1,4 @@
-// entrega2/frontend/src/modules/Map/LiveMapPage.jsx
-
 import React, { useEffect, useState, useContext, useMemo } from 'react';
-import apiClient from '../../api/axiosConfig';
 import L from 'leaflet';
 import { MapContainer, TileLayer } from 'react-leaflet';
 import MarkerClusterGroup from 'react-leaflet-cluster';
@@ -11,7 +8,21 @@ import 'react-leaflet-cluster/lib/assets/MarkerCluster.Default.css';
 import { WebSocketContext } from '../../context/WebSocketContext';
 import { Menu, X, Users, Battery, Clock } from 'lucide-react';
 import MemoizedDriverMarker from './components/MemoizedDriverMarker';
-import MapSkeleton from './components/MapSkeleton'; // Un skeleton para la carga inicial
+import MapSkeleton from './components/MapSkeleton';
+
+// --- ARREGLO PARA LOS ICONOS POR DEFECTO DE LEAFLET CON VITE ---
+import icon from 'leaflet/dist/images/marker-icon.png';
+import iconShadow from 'leaflet/dist/images/marker-shadow.png';
+import iconRetina from 'leaflet/dist/images/marker-icon-2x.png';
+
+delete L.Icon.Default.prototype._getIconUrl;
+
+L.Icon.Default.mergeOptions({
+    iconRetinaUrl: iconRetina,
+    iconUrl: icon,
+    shadowUrl: iconShadow
+});
+// --- FIN DEL ARREGLO ---
 
 const createClusterIcon = (cluster) => {
   return new L.DivIcon({
@@ -39,59 +50,26 @@ const DriverMarkersLayer = ({ drivers }) => {
 };
 
 const LiveMapPage = () => {
-  const { lastMessage } = useContext(WebSocketContext);
-  const [drivers, setDrivers] = useState([]);
+  const { drivers } = useContext(WebSocketContext);
   const [showSidebar, setShowSidebar] = useState(true);
-  const [loading, setLoading] = useState(true);
-
-  // --- INICIO DE LA LÓGICA DE TIEMPO REAL ---
   const [now, setNow] = useState(new Date());
 
   useEffect(() => {
-    // Este temporizador fuerza al componente a re-evaluar el estado de los conductores
-    const intervalId = setInterval(() => setNow(new Date()), 15000); // Cada 15 segundos
+    const intervalId = setInterval(() => setNow(new Date()), 15000);
     return () => clearInterval(intervalId);
   }, []);
-  // --- FIN DE LA LÓGICA DE TIEMPO REAL ---
 
-  useEffect(() => {
-    apiClient.get('/drivers/detailed')
-      .then(res => setDrivers(res.data))
-      .catch(console.error)
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    if (!lastMessage || lastMessage.type !== 'DRIVER_LOCATION_UPDATE') return;
-    
-    const updatedDriverData = lastMessage.data;
-    
-    setDrivers(prevDrivers => {
-      const driverIndex = prevDrivers.findIndex(d => d.id_usuario === updatedDriverData.id_usuario);
-      if (driverIndex > -1) {
-        const newDrivers = [...prevDrivers];
-        newDrivers[driverIndex] = { ...newDrivers[driverIndex], ultima_latitud: updatedDriverData.latitud, ultima_longitud: updatedDriverData.longitud, estado_actual: updatedDriverData.estado, ultima_bateria_porcentaje: updatedDriverData.bateria_porcentaje, ultima_actualizacion_loc: new Date().toISOString() };
-        return newDrivers;
-      } else {
-        return [...prevDrivers, { id_usuario: updatedDriverData.id_usuario, nombre_display: updatedDriverData.id_usuario, ultima_latitud: updatedDriverData.latitud, ultima_longitud: updatedDriverData.longitud, estado_actual: updatedDriverData.estado, ultima_bateria_porcentaje: updatedDriverData.bateria_porcentaje, ultima_actualizacion_loc: new Date().toISOString() }];
-      }
-    });
-  }, [lastMessage]);
-
-  // Usamos useMemo para filtrar los conductores que se mostrarán.
-  // Se recalcula solo si la lista de 'drivers' cambia o si 'now' se actualiza.
   const activeDrivers = useMemo(() => {
     return drivers.filter(d => {
       if (!d.ultima_latitud || !d.ultima_longitud || !d.ultima_actualizacion_loc) {
         return false;
       }
-      // La condición clave: la última actualización debe ser de hace menos de 10 minutos.
       const minutesDiff = (now - new Date(d.ultima_actualizacion_loc)) / 60000;
       return minutesDiff < 10;
     });
   }, [drivers, now]);
 
-  if (loading) {
+  if (!drivers) {
     return <MapSkeleton />;
   }
 
@@ -106,14 +84,14 @@ const LiveMapPage = () => {
       </button>
 
       <MapContainer 
-        center={[10.4806, -66.9036]}
+        center={[10.246128, -67.598838]}
         zoom={12} 
         style={{ height: '100%', width: '100%', zIndex: 1 }}
         key="live-map-page"
       >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
-          url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
         <DriverMarkersLayer drivers={activeDrivers} />
       </MapContainer>

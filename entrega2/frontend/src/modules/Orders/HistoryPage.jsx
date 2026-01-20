@@ -26,8 +26,9 @@ const HistoryPage = () => {
   };
 
   return (
-    <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-slate-800">Historial</h1>
+    <div className="space-y-6 ">
+      <div className='p-4 bg-white rounded-xl shadow-sm border'><h1 className="text-2xl font-bold text-slate-800">Historial</h1></div>
+      
       
       <div className="bg-white p-4 rounded-xl border shadow-sm">
         <form onSubmit={searchHistory} className="flex gap-4 items-end">
