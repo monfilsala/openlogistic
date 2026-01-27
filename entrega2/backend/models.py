@@ -12,6 +12,7 @@ class EstadoPedido(str, Enum):
     ENTREGADO = "entregado"
     CANCELADO = "cancelado"
     CON_NOVEDAD = "con_novedad"
+    ASIGNADO = "asignado"
 
 class EstadoTicket(str, Enum):
     ABIERTO = "abierto"
@@ -320,3 +321,7 @@ class RestrictedZone(RestrictedZoneBase):
     id: int
     class Config:
         from_attributes = True
+
+class LoginSuccessRequest(BaseModel):
+    fcm_token: Optional[str] = None
+    device_info: Optional[str] = None

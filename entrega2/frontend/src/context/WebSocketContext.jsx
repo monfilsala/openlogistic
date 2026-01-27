@@ -5,9 +5,10 @@ export const WebSocketContext = createContext(null);
 export const useWebSocket = () => useContext(WebSocketContext);
 
 // Función HELPER para calcular repartidores activos
+// Mantenemos el umbral de 10 minutos
+const TEN_MINUTES_IN_MS = 10 * 60 * 1000;
 const calculateActiveDrivers = (drivers) => {
   const now = new Date();
-  const TEN_MINUTES_IN_MS = 10 * 60 * 1000;
   if (!Array.isArray(drivers)) return 0;
   return drivers.filter(driver => {
     if (!driver.ultima_actualizacion_loc) return false;
@@ -25,13 +26,12 @@ export const WebSocketProvider = ({ children }) => {
   const [alertConfig, setAlertConfig] = useState(null);
   const ws = useRef(null);
 
+  // useEffect para cargar configuración y datos iniciales (sin cambios)
   useEffect(() => {
     apiClient.get('/config/alert_thresholds_minutes')
       .then(res => setAlertConfig(res.data))
       .catch(() => console.error("CONFIGURACIÓN DE ALERTAS NO ENCONTRADA."));
-  }, []);
-
-  useEffect(() => {
+      
     const fetchInitialData = async () => {
       try {
         const [resMetrics, resDrivers, resOrders] = await Promise.all([
@@ -48,6 +48,28 @@ export const WebSocketProvider = ({ children }) => {
     };
     fetchInitialData();
   }, []);
+
+  // --- INICIO DE LA CORRECCIÓN CLAVE: TEMPORIZADOR DE RE-CÁLCULO ---
+  useEffect(() => {
+    // Este intervalo asegura que el contador de activos se actualice
+    // y descuente a los repartidores que quedan inactivos por el paso del tiempo.
+    const recalculateInterval = setInterval(() => {
+        if (drivers.length > 0) {
+            setMetrics(prevMetrics => {
+                const activeCount = calculateActiveDrivers(drivers);
+                // Prevenir re-renderizados innecesarios si el número no ha cambiado
+                if (prevMetrics && prevMetrics.drivers_activos === activeCount) {
+                    return prevMetrics;
+                }
+                return { ...prevMetrics, drivers_activos: activeCount };
+            });
+        }
+    }, 15000); // Se ejecuta cada 15 segundos para una buena capacidad de respuesta
+
+    return () => clearInterval(recalculateInterval); // Limpiar al desmontar
+  }, [drivers]); // El efecto depende de la lista 'drivers'. Se reinicia si cambia.
+  // --- FIN DE LA CORRECCIÓN CLAVE ---
+
 
   useEffect(() => {
     function connect() {
@@ -84,8 +106,9 @@ export const WebSocketProvider = ({ children }) => {
                 return newDriversList;
               });
 
+              // Esta actualización inmediata es buena para cuando un nuevo repartidor se conecta
               setMetrics(prevMetrics => {
-                  if (!newDriversList) return prevMetrics; // Safety check
+                  if (!newDriversList) return prevMetrics;
                   const activeCount = calculateActiveDrivers(newDriversList);
                   return { ...prevMetrics, drivers_activos: activeCount };
               });

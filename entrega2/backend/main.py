@@ -17,7 +17,7 @@ import httpx
 from decimal import Decimal
 import io
 import csv
-from firebase_admin import auth
+from firebase_admin import auth, messaging 
 # Importar modelos, base de datos y utilidades de autenticación
 from models import *
 from database import *
@@ -28,6 +28,7 @@ from contextlib import asynccontextmanager
 import asyncio
 from passlib.context import CryptContext
 import secrets
+from math import radians, cos, sin, asin, sqrt
 
 # --- CONFIGURACIÓN INICIAL ---
 CARACAS_TZ = pytz.timezone('America/Caracas')
@@ -264,6 +265,15 @@ def is_point_in_polygon(point_lat: float, point_lng: float, polygon_coords: List
         
     return inside
 
+def haversine(lon1, lat1, lon2, lat2):
+    lon1, lat1, lon2, lat2 = map(radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1 
+    dlat = lat2 - lat1 
+    a = sin(dlat/2)**2 + cos(lat1) * cos(lat2) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a)) 
+    r = 6371 # Radio de la Tierra en km
+    return c * r
+
 # --- USAMOS LIFESPAN PARA INICIAR Y DETENER EL SCHEDULER ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -408,6 +418,8 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/")
 async def root(): return {"message": "Delivery Platform V4.0.1 Running"}
+
+
 
 # --- ENDPOINTS DE ADMINISTRACIÓN DE USUARIOS ---
 @app.post("/admin/users/sync", tags=["Admin"], dependencies=[Depends(RoleChecker("access:all"))])
@@ -830,6 +842,147 @@ async def actualizar_estado_pedido(
     except Exception as e:
         db.rollback()
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(e))
+
+@app.get("/pedidos/cercanos", response_model=List[Pedido], tags=["Pedidos"])
+async def listar_pedidos_cercanos(
+    lat: float = Query(..., description="Latitud del usuario"),
+    lng: float = Query(..., description="Longitud del usuario"),
+    user: User = Depends(get_current_user), # Obtenemos el usuario autenticado
+    db=Depends(get_db)
+):
+    """
+    Obtiene pedidos cercanos usando lógica de 'Radar Expansivo'.
+    El radio de búsqueda crece automáticamente según el tiempo que el pedido lleva esperando.
+    - 0 a 10s: 200m
+    - 10s a 20s: 1.2km
+    - ... hasta un máximo de 3km.
+    """
+    pedidos_cercanos_list = []
+    id_repartidor = user.email # Asumimos que el ID es el email, ajustar si es user.uid
+
+    try:
+        with db.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. Validaciones de Repartidor (Batería y Tickets)
+            cur.execute("SELECT ultima_bateria_porcentaje FROM usuarios WHERE id_usuario = %s", (id_repartidor,))
+            repartidor_info = cur.fetchone()
+            
+            # Si tiene menos de 15% de batería, no ve pedidos (regla de negocio opcional, comenta si no la quieres)
+            if repartidor_info and repartidor_info.get('ultima_bateria_porcentaje') is not None:
+                 if repartidor_info['ultima_bateria_porcentaje'] < 15:
+                     return [] 
+
+            # Si tiene un pedido con ticket abierto (bloqueado), no ve nuevos pedidos
+            cur.execute("""
+                SELECT 1 FROM pedidos p
+                WHERE p.repartidor_id = %s AND p.tiene_ticket_abierto = TRUE
+                AND p.estado NOT IN (%s, %s) LIMIT 1;
+            """, (id_repartidor, EstadoPedido.ENTREGADO.value, EstadoPedido.CANCELADO.value))
+            if cur.fetchone(): 
+                return []
+
+            # 2. Obtener Pedidos Pendientes
+            # Traemos todos los pendientes para filtrar en memoria (más rápido para pocos miles de pedidos)
+            # Ojo: Si tienes millones, esto debe ser espacial en SQL (PostGIS). Para MVP está bien así.
+            query_pedidos = """
+                SELECT p.*, c.nombre as nombre_comercio, i.id_externo
+                FROM pedidos p
+                JOIN comercios c ON p.id_comercio = c.id_comercio
+                LEFT JOIN integraciones i ON p.id = i.pedido_id
+                WHERE p.estado = %s 
+                AND (p.repartidor_id IS NULL OR p.repartidor_id = %s);
+            """
+            cur.execute(query_pedidos, (EstadoPedido.PENDIENTE.value, id_repartidor))
+            raw_pedidos = cur.fetchall()
+
+            now = datetime.now(CARACAS_TZ)
+            MAX_RADIUS_KM = 3.0
+            EXPANSION_RATE_SECONDS = 10 # Cada 10s crece 1km aprox (ajustable)
+
+            for p_dict in raw_pedidos:
+                # Convertir a modelo Pydantic para facilitar manejo
+                pedido = Pedido(**p_dict)
+                
+                # Si está asignado específicamente a este repartidor, lo ve siempre sin importar distancia
+                if pedido.repartidor_id == id_repartidor:
+                    pedidos_cercanos_list.append(pedido)
+                    continue
+
+                # Calcular edad del pedido en segundos
+                # Aseguramos que fecha_creacion tenga zona horaria
+                fecha_creacion = pedido.fecha_creacion
+                if fecha_creacion.tzinfo is None:
+                    fecha_creacion = pytz.utc.localize(fecha_creacion).astimezone(CARACAS_TZ)
+                
+                age_seconds = (now - fecha_creacion).total_seconds()
+                if age_seconds < 0: age_seconds = 0
+
+                # Lógica de Radar: Radio base 0.2km + 1km por cada intervalo de tiempo
+                # Ejemplo: 
+                # 0s -> 0.2km
+                # 10s -> 1.2km
+                # 20s -> 2.2km
+                # 30s -> 3.0km (Max)
+                dynamic_radius = min(0.2 + (age_seconds / EXPANSION_RATE_SECONDS), MAX_RADIUS_KM)
+                
+                # Calcular distancia real
+                dist = haversine(lng, lat, pedido.longitud_retiro, pedido.latitud_retiro)
+
+                if dist <= dynamic_radius:
+                    pedidos_cercanos_list.append(pedido)
+
+        # Ordenar: Los más antiguos primero (FIFO) para que se atiendan antes
+        return sorted(pedidos_cercanos_list, key=lambda p: p.fecha_creacion)
+
+    except Exception as e:
+        logger.error(f"Error en /pedidos/cercanos: {e}")
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
+
+@app.post("/pedidos/{pedido_id}/aceptar", response_model=Pedido, tags=["Pedidos"])
+async def aceptar_pedido(
+    pedido_id: int,
+    background_tasks: BackgroundTasks,
+    user: User = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Permite a un repartidor aceptar un pedido. Usa un bloqueo de fila ('FOR UPDATE')
+    para prevenir que múltiples repartidores acepten el mismo pedido simultáneamente.
+    """
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        # --- INICIO DE LA CORRECCIÓN CLAVE ---
+        # 1. Bloquear la fila del pedido y OBTENER el nombre del comercio con un JOIN
+        query = """
+            SELECT p.*, c.nombre as nombre_comercio 
+            FROM pedidos p
+            JOIN comercios c ON p.id_comercio = c.id_comercio
+            WHERE p.id = %s FOR UPDATE
+        """
+        cur.execute(query, (pedido_id,))
+        pedido = cur.fetchone()
+        # --- FIN DE LA CORRECCIÓN CLAVE ---
+
+        if not pedido:
+            raise HTTPException(status_code=404, detail="Pedido no encontrado.")
+        
+        if pedido['estado'] != 'pendiente':
+            raise HTTPException(status_code=409, detail="Este pedido ya fue aceptado por otro repartidor.")
+
+        # 2. Actualizar el pedido
+        cur.execute(
+            "UPDATE pedidos SET repartidor_id = %s, estado = 'aceptado', fecha_actualizacion = NOW() WHERE id = %s RETURNING *",
+            (user.email, pedido_id)
+        )
+        updated_pedido = cur.fetchone()
+        db.commit()
+
+    # 3. Añadir el nombre del comercio a la respuesta (ahora lo tenemos del primer SELECT)
+    # y notificar a todos y disparar webhooks
+    updated_pedido['nombre_comercio'] = pedido['nombre_comercio']
+    
+    await manager.broadcast({"type": "ORDER_ASSIGNED", "id": pedido_id, "data": updated_pedido})
+    background_tasks.add_task(trigger_integration_webhooks, "ORDER_STATUS_UPDATE", updated_pedido.copy(), get_db_connection())
+
+    return Pedido(**updated_pedido)
 
 @app.get("/pedidos/{pedido_id}/logs", tags=["Pedidos"], dependencies=[Depends(get_current_user)])
 async def obtener_logs_del_pedido(pedido_id: int, db=Depends(get_db)):
@@ -1322,50 +1475,69 @@ async def get_active_drivers(db=Depends(get_db)):
 async def asignar_repartidor_a_pedido(
     pedido_id: int, 
     data: PedidoAsignarRepartidor,
-    background_tasks: BackgroundTasks, # <-- MODIFICACIÓN
+    background_tasks: BackgroundTasks, 
     db=Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     """
-    Asigna un repartidor a un pedido pendiente y dispara el webhook de cambio de estado.
+    Asigna un repartidor a un pedido (estado 'asignado') y envía Push Notification.
+    El repartidor debe aceptar o rechazar en su app.
     """
     with db.cursor(cursor_factory=RealDictCursor) as cur:
-        # 1. Bloquear y validar el pedido
+        # 1. Validaciones
         cur.execute("SELECT * FROM pedidos WHERE id = %s FOR UPDATE", (pedido_id,))
         pedido = cur.fetchone()
         if not pedido:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Pedido no encontrado")
-        if pedido['estado'] != 'pendiente':
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"No se puede asignar. El pedido ya está en estado '{pedido['estado']}'.")
+        
+        # Permitir reasignar si está pendiente o si ya estaba asignado a otro (corrección)
+        if pedido['estado'] not in ['pendiente', 'asignado']:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"El pedido está en estado '{pedido['estado']}' y no se puede reasignar.")
 
-        # 2. Validar que el repartidor exista
-        cur.execute("SELECT id_usuario FROM usuarios WHERE id_usuario = %s", (data.repartidor_id,))
-        if not cur.fetchone():
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Repartidor con ID '{data.repartidor_id}' no encontrado.")
+        # Obtener token FCM del repartidor
+        cur.execute("SELECT id_usuario, fcm_token FROM usuarios WHERE id_usuario = %s", (data.repartidor_id,))
+        repartidor = cur.fetchone()
+        if not repartidor:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"Repartidor no encontrado.")
             
-        # 3. Actualizar el pedido en la base de datos
+        # 2. Actualizar a estado 'asignado' (Intermedio)
         cur.execute(
-            "UPDATE pedidos SET repartidor_id = %s, estado = 'aceptado', fecha_actualizacion = NOW() WHERE id = %s RETURNING *",
+            "UPDATE pedidos SET repartidor_id = %s, estado = 'asignado', fecha_actualizacion = NOW() WHERE id = %s RETURNING *",
             (data.repartidor_id, pedido_id)
         )
         updated_pedido = cur.fetchone()
 
-        # 4. Registrar logs
-        log_pedido_status_change(cur, pedido_id, "aceptado", data.repartidor_id, manual_change=True)
+        # 3. Logs
+        log_pedido_status_change(cur, pedido_id, "asignado", data.repartidor_id, manual_change=True)
         log_system_action(db, "WARNING", "manual_assign", {"pedido_id": pedido_id, "driver_id": data.repartidor_id}, usuario=current_user.email)
         
         db.commit()
 
-        # 5. Preparar respuesta y notificar por WebSocket
+        # 4. Enviar Push Notification (FCM)
+        if repartidor['fcm_token']:
+            try:
+                message = messaging.Message(
+                    notification=messaging.Notification(
+                        title="¡Nuevo Pedido Asignado!",
+                        body=f"Te han asignado el pedido #{pedido_id}. Toca para ver detalles.",
+                    ),
+                    data={
+                        "type": "ORDER_ASSIGNED",
+                        "order_id": str(pedido_id),
+                        "click_action": "FLUTTER_NOTIFICATION_CLICK",
+                    },
+                    token=repartidor['fcm_token'],
+                )
+                messaging.send(message)
+            except Exception as e:
+                logger.error(f"Error enviando FCM a {data.repartidor_id}: {e}")
+
+        # 5. Notificar WebSocket y Webhooks
         cur.execute("SELECT nombre FROM comercios WHERE id_comercio = %s", (updated_pedido['id_comercio'],))
         updated_pedido['nombre_comercio'] = cur.fetchone()['nombre']
         
         await manager.broadcast({"type": "ORDER_ASSIGNED", "id": pedido_id, "repartidor_id": data.repartidor_id, "data": updated_pedido})
-        
-        # --- INICIO DE LA MODIFICACIÓN CLAVE ---
-        # 6. Disparar el webhook de cambio de estado en segundo plano
         background_tasks.add_task(trigger_integration_webhooks, "ORDER_STATUS_UPDATE", updated_pedido.copy(), get_db_connection())
-        # --- FIN DE LA MODIFICACIÓN CLAVE ---
 
         return Pedido(**updated_pedido)
 
@@ -1669,3 +1841,69 @@ async def delete_restricted_zone(zone_id: int, db=Depends(get_db)):
             raise HTTPException(status_code=404, detail="Zona no encontrada")
         db.commit()
     return {"status": "deleted", "id": zone_id}
+
+
+@app.get("/pedidos/activos/mi-reparto", response_model=List[Pedido], tags=["Pedidos"])
+async def obtener_pedidos_activos_del_repartidor(
+    user: User = Depends(get_current_user), # Usamos get_current_user para obtener el repartidor autenticado
+    db=Depends(get_db)
+):
+    """
+    Obtiene todos los pedidos activos asignados al repartidor que realiza la petición.
+    Un pedido se considera "activo" si su estado no es 'entregado' ni 'cancelado'.
+    
+    Este endpoint es ideal para que la app del repartidor se sincronice al iniciar.
+    """
+    repartidor_id = user.email # Asumimos que el id_usuario del repartidor es su email
+
+    query = """
+        SELECT p.*, c.nombre as nombre_comercio, i.id_externo
+        FROM pedidos p
+        JOIN comercios c ON p.id_comercio = c.id_comercio
+        LEFT JOIN integraciones i ON p.id = i.pedido_id
+        WHERE p.repartidor_id = %s
+        AND p.estado NOT IN ('entregado', 'cancelado')
+        ORDER BY p.fecha_creacion ASC;
+    """
+
+    with db.cursor(cursor_factory=RealDictCursor) as cur:
+        cur.execute(query, (repartidor_id,))
+        pedidos_activos = cur.fetchall()
+        
+        # El modelo 'Pedido' espera que cada objeto tenga un 'nombre_comercio',
+        # que ya obtenemos con el JOIN.
+        return [Pedido(**pedido) for pedido in pedidos_activos]
+
+
+@app.post("/auth/login-success", tags=["Auth"], dependencies=[Depends(get_current_user)])
+async def register_login_success(
+    data: LoginSuccessRequest,
+    user: User = Depends(get_current_user),
+    db=Depends(get_db)
+):
+    """
+    Registra el inicio de sesión exitoso y actualiza el token FCM del usuario.
+    """
+    try:
+        with db.cursor() as cur:
+            # 1. Actualizar Token FCM
+            if data.fcm_token:
+                cur.execute(
+                    "UPDATE usuarios SET fcm_token = %s, ultima_actualizacion_loc = NOW() WHERE id_usuario = %s",
+                    (data.fcm_token, user.email)
+                )
+            
+            # 2. Registrar Log de Acceso
+            log_system_action(db, "INFO", "user_login", {
+                "user_id": user.email,
+                "device": data.device_info,
+                "has_fcm": bool(data.fcm_token)
+            }, usuario=user.email)
+            
+            db.commit()
+            
+        return {"status": "success", "msg": "FCM Token updated"}
+    except Exception as e:
+        logger.error(f"Error en login-success: {e}")
+        # No fallar el login si esto falla, solo loguear
+        return {"status": "warning", "msg": str(e)}
